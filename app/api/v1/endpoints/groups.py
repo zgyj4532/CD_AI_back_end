@@ -51,7 +51,6 @@ class GroupUpdate(BaseModel):
     group_name: str | None = None
     teacher_id: str | None = None
     description: str | None = None
-    current_user: CurrentUser
 
 
 class GroupBind(BaseModel):
@@ -681,19 +680,26 @@ async def delete_group(group_id: str, payload: DeleteGroupRequest):
     summary="更新群组",
     description="更新群组信息（群名/教师/描述），仅群主或群组管理员可更新"
 )
-async def update_group(group_id: str, payload: GroupUpdate):
-    cu = _parse_current_user(payload.current_user.model_dump())
+async def update_group(
+    group_id: str, 
+    payload: GroupUpdate,
+    current_user: Optional[str] = Header(None, alias="X-Current-User", description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
+):
+    # 解析并验证当前用户身份
+    cu = _parse_current_user(current_user)
+    
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        # ensure caller exists in DB
+        # 确保调用者在数据库中存在
         _ensure_caller_identity(cursor, cu)
 
+        # 验证群组是否存在
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="群组不存在")
 
-        # permission: only owner or group admin
+        # 权限检查：只有群主或群组管理员可更新
         cursor.execute(
             "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `role` IN ('owner','admin') AND `is_active`=1",
             (group_id, cu.get("sub", 0)),
@@ -701,19 +707,22 @@ async def update_group(group_id: str, payload: GroupUpdate):
         if not cursor.fetchone():
             raise HTTPException(status_code=403, detail="只有群主或群组管理员可更新群组信息")
 
+        # 准备更新数据
         updates = []
         params = []
         if payload.group_name is not None:
             updates.append("`group_name` = %s")
             params.append(payload.group_name.strip())
         if payload.teacher_id is not None:
-            # ensure teacher exists
-            cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (payload.teacher_id,))
-            row = cursor.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="指定教师不存在")
-            updates.append("`teacher_id` = %s")
-            params.append(payload.teacher_id.strip())
+            teacher_id_stripped = payload.teacher_id.strip()
+            if teacher_id_stripped and teacher_id_stripped != "string":
+                # 确保教师存在
+                cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (teacher_id_stripped,))
+                row = cursor.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="指定教师不存在")
+                updates.append("`teacher_id` = %s")
+                params.append(teacher_id_stripped)
         if payload.description is not None:
             updates.append("`description` = %s")
             params.append(payload.description.strip())
@@ -721,6 +730,7 @@ async def update_group(group_id: str, payload: GroupUpdate):
         if not updates:
             return {"group_id": group_id, "message": "无更新内容"}
 
+        # 执行更新
         params.append(group_id)
         sql = f"UPDATE `groups` SET {', '.join(updates)} WHERE `group_id` = %s"
         cursor.execute(sql, tuple(params))
