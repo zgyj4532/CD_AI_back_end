@@ -41,7 +41,6 @@ class GroupMember(BaseModel):
 
     member_id: int | None = None
     member_type: str = "student"  # 学生 student / 教师 teacher / 管理员 admin
-    role: str = "member"  # 成员 member / 管理员 admin / 群主 owner
     action: str = "add"  # add: 添加成员, list_students: 获取教师负责的学生列表
     student_ids: list[int] | None = None  # 批量添加时的学生ID列表
     current_user: CurrentUser
@@ -51,7 +50,6 @@ class GroupUpdate(BaseModel):
     group_name: str | None = None
     teacher_id: str | None = None
     description: str | None = None
-    current_user: CurrentUser
 
 
 class GroupBind(BaseModel):
@@ -136,18 +134,6 @@ def _ensure_caller_identity(cursor, cu: dict) -> None:
                 return
 
     raise HTTPException(status_code=403, detail="当前用户在系统中不存在或其身份与数据库不符")
-
-
-def _ensure_caller_is_group_owner(cursor, group_id: str, caller_id: int) -> None:
-    cursor.execute(
-        """
-        SELECT 1 FROM `group_members` 
-        WHERE `group_id`=%s AND `member_id`=%s AND `role`='owner' AND `is_active`=1
-        """,
-        (group_id, caller_id)
-    )
-    if not cursor.fetchone():
-        raise HTTPException(status_code=403, detail="仅该群组的群主可设置管理员教师")
 
 
 def _validate_teacher_exists(cursor, teacher_id: int) -> None:
@@ -652,10 +638,19 @@ async def delete_group(group_id: str, payload: DeleteGroupRequest):
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="群组不存在")
-        # check owner
-        cursor.execute("SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `role`='owner' AND `is_active`=1", (group_id, cu.get("sub", 0)))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="只有群主可解散群组")
+        # 检查权限：教师或管理员可删除群组
+        roles_norm = _normalize_roles(cu.get("roles", []))
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        else:
+            # 教师需要验证是否是该群组的成员
+            cursor.execute(
+                "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`='teacher' AND `is_active`=1",
+                (group_id, cu.get("sub", 0)),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="只有教师或管理员可解散群组")
 
         # 删除群组成员关系
         cursor.execute("DELETE FROM `group_members` WHERE `group_id` = %s", (group_id,))
@@ -681,39 +676,55 @@ async def delete_group(group_id: str, payload: DeleteGroupRequest):
     summary="更新群组",
     description="更新群组信息（群名/教师/描述），仅群主或群组管理员可更新"
 )
-async def update_group(group_id: str, payload: GroupUpdate):
-    cu = _parse_current_user(payload.current_user.model_dump())
+async def update_group(
+    group_id: str, 
+    payload: GroupUpdate,
+    current_user: Optional[str] = Header(None, alias="X-Current-User", description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
+):
+    # 解析并验证当前用户身份
+    cu = _parse_current_user(current_user)
+    
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        # ensure caller exists in DB
+        # 确保调用者在数据库中存在
         _ensure_caller_identity(cursor, cu)
 
+        # 验证群组是否存在
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="群组不存在")
 
-        # permission: only owner or group admin
-        cursor.execute(
-            "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `role` IN ('owner','admin') AND `is_active`=1",
-            (group_id, cu.get("sub", 0)),
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="只有群主或群组管理员可更新群组信息")
+        # 权限检查：教师或管理员可更新
+        roles_norm = _normalize_roles(cu.get("roles", []))
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        else:
+            # 教师需要验证是否是该群组的成员
+            cursor.execute(
+                "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`='teacher' AND `is_active`=1",
+                (group_id, cu.get("sub", 0)),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="只有教师或管理员可更新群组信息")
 
+        # 准备更新数据
         updates = []
         params = []
         if payload.group_name is not None:
             updates.append("`group_name` = %s")
             params.append(payload.group_name.strip())
         if payload.teacher_id is not None:
-            # ensure teacher exists
-            cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (payload.teacher_id,))
-            row = cursor.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="指定教师不存在")
-            updates.append("`teacher_id` = %s")
-            params.append(payload.teacher_id.strip())
+            teacher_id_stripped = payload.teacher_id.strip()
+            if teacher_id_stripped and teacher_id_stripped != "string":
+                # 确保教师存在
+                cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (teacher_id_stripped,))
+                row = cursor.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="指定教师不存在")
+                updates.append("`teacher_id` = %s")
+                params.append(teacher_id_stripped)
         if payload.description is not None:
             updates.append("`description` = %s")
             params.append(payload.description.strip())
@@ -721,6 +732,7 @@ async def update_group(group_id: str, payload: GroupUpdate):
         if not updates:
             return {"group_id": group_id, "message": "无更新内容"}
 
+        # 执行更新
         params.append(group_id)
         sql = f"UPDATE `groups` SET {', '.join(updates)} WHERE `group_id` = %s"
         cursor.execute(sql, tuple(params))
@@ -740,19 +752,32 @@ async def update_group(group_id: str, payload: GroupUpdate):
 
 
 @router.post(
-    "/{group_id}/members",
+    "/members",
     summary="添加群组成员或获取教师负责的学生列表",
     description="为指定群组添加成员（单个或批量），或获取教师负责的学生列表"
 )
 async def add_group_member(
-    group_id: str,
     action: str = Query("add", description="操作类型: add(添加成员) 或 list_students(获取学生列表)", enum=["add", "list_students"]),
+    group_id: str | None = Query(None, description="群组ID（add操作时必填）"),
     member_id: int | None = Query(None, description="单个成员ID"),
-    member_type: str = Query("student", description="成员类型: student, teacher, admin", enum=["student", "teacher", "admin"]),
-    role: str = Query("member", description="角色: member, admin, owner", enum=["member", "admin", "owner"]),
     student_ids: str | None = Query(None, description="批量添加学生ID列表，逗号分隔，例如: 1,2,3"),
+    teacher_id: int | None = Query(None, description="教师ID（管理员查看特定教师学生时必填）"),
     current_user: str = Query(None, description="当前用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"teacher\"],\"username\":\"teacher1\"}")
 ):
+    # 验证参数：当action为list_students时，不需要填写成员相关参数
+    if action == "list_students":
+        if member_id is not None:
+            raise HTTPException(status_code=400, detail="选择list_students操作时，不需要填写member_id参数")
+        if student_ids is not None:
+            raise HTTPException(status_code=400, detail="选择list_students操作时，不需要填写student_ids参数")
+        if group_id is not None:
+            raise HTTPException(status_code=400, detail="选择list_students操作时，不需要填写group_id参数")
+    # 当action为add时，需要提供成员ID或学生ID列表，且group_id必填
+    elif action == "add":
+        if not group_id:
+            raise HTTPException(status_code=400, detail="选择add操作时，必须填写group_id参数")
+        if member_id is None and student_ids is None:
+            raise HTTPException(status_code=400, detail="选择add操作时，必须提供member_id或student_ids参数")
     logger.info(f"请求: group_id={group_id}, action={action}")
     cu = _parse_current_user(current_user)
     roles_norm = _normalize_roles(cu.get("roles", []))
@@ -765,53 +790,71 @@ async def add_group_member(
         
         if action == "list_students":
             # 获取教师负责的学生列表
-            if "teacher" not in roles_norm and "教师" not in roles_norm:
-                raise HTTPException(status_code=403, detail="仅教师可获取学生列表")
-            
-            teacher_id = cu.get("sub", 0)
-            # 通过 papers 表查询与该教师关联的学生
-            cursor.execute(
-                """
-                SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email, s.grade, s.class_name
-                FROM students s
-                INNER JOIN papers p ON s.id = p.owner_id
-                WHERE p.teacher_id = %s
-                ORDER BY s.name
-                """,
-                (teacher_id,)
-            )
-            students = cursor.fetchall()
-            return {
-                "action": "list_students",
-                "teacher_id": teacher_id,
-                "students": students,
-                "total": len(students)
-            }
+            if "admin" in roles_norm:
+                # 管理员需要输入教师ID来查看特定教师的学生
+                if not teacher_id:
+                    raise HTTPException(status_code=400, detail="管理员查看学生列表时，必须填写teacher_id参数")
+                # 验证教师是否存在
+                cursor.execute("SELECT 1 FROM `teachers` WHERE `id` = %s", (teacher_id,))
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail=f"教师ID {teacher_id} 不存在")
+                # 查询该教师的学生
+                cursor.execute(
+                    """
+                    SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email, s.grade, s.class_name
+                    FROM students s
+                    INNER JOIN papers p ON s.id = p.owner_id
+                    WHERE p.teacher_id = %s
+                    ORDER BY s.name
+                    """,
+                    (teacher_id,)
+                )
+                students = cursor.fetchall()
+                return {
+                    "action": "list_students",
+                    "teacher_id": teacher_id,
+                    "students": students,
+                    "total": len(students)
+                }
+            elif "teacher" in roles_norm or "教师" in roles_norm:
+                # 教师只能返回自己的学生
+                teacher_id = cu.get("sub", 0)
+                # 通过 papers 表查询与该教师关联的学生
+                cursor.execute(
+                    """
+                    SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email, s.grade, s.class_name
+                    FROM students s
+                    INNER JOIN papers p ON s.id = p.owner_id
+                    WHERE p.teacher_id = %s
+                    ORDER BY s.name
+                    """,
+                    (teacher_id,)
+                )
+                students = cursor.fetchall()
+                return {
+                    "action": "list_students",
+                    "teacher_id": teacher_id,
+                    "students": students,
+                    "total": len(students)
+                }
+            else:
+                raise HTTPException(status_code=403, detail="只有教师或管理员可获取学生列表")
         
         # 以下是 add 操作
-        if member_type not in ["student", "teacher", "admin"]:
-            logger.warning(f"无效member_type: {member_type}")
-            raise HTTPException(status_code=400, detail="成员类型必须是student、teacher或admin")
-        if role not in ["member", "admin", "owner"]:
-            logger.warning(f"无效role: {role}")
-            raise HTTPException(status_code=400, detail="角色必须是member、admin或owner")
-        
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="群组不存在")
-        # 检查调用者是否有权限（owner/admin）
-        cursor.execute(
-            "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `role` IN ('owner','admin') AND `is_active`=1",
-            (group_id, cu.get("sub", 0)),
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="只有群主或群组管理员可添加成员")
+        # 检查调用者是否有权限（教师或管理员）
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        elif "teacher" in roles_norm or "教师" in roles_norm:
+            # 教师可以管理群组，拉自己班级的学生
+            pass
+        else:
+            raise HTTPException(status_code=403, detail="只有教师或管理员可添加成员")
         
-        # if trying to add owner, only current owner can do that
-        if role == 'owner':
-            cursor.execute("SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `role`='owner' AND `is_active`=1", (group_id, cu.get('sub', 0)))
-            if not cursor.fetchone():
-                raise HTTPException(status_code=403, detail="只有当前群主可任命新群主")
+        # 移除群主任命逻辑，不再需要群组管理员和群主设定
         
         # 批量添加或单个添加
         if student_ids:
@@ -829,19 +872,30 @@ async def add_group_member(
                     logger.warning(f"学生ID {sid} 不存在，跳过")
                     continue
                 
-                # 插入成员
+                # 检查师生关系：如果是教师操作，确保学生是该教师的学生
+                if "teacher" in roles_norm or "教师" in roles_norm:
+                    teacher_id = cu.get("sub", 0)
+                    cursor.execute(
+                        "SELECT 1 FROM `papers` WHERE `owner_id` = %s AND `teacher_id` = %s",
+                        (sid, teacher_id)
+                    )
+                    if not cursor.fetchone():
+                        logger.warning(f"学生ID {sid} 不是该教师的学生，跳过")
+                        continue
+                
+                # 插入成员，所有成员默认为普通成员
                 cursor.execute(
                     """
                     INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`)
                     VALUES (%s, %s, %s, %s, 1, NOW())
                     ON DUPLICATE KEY UPDATE `is_active` = 1, `role` = VALUES(`role`), `updated_at`=NOW()
                     """,
-                    (group_id, sid, "student", role),
+                    (group_id, sid, "student", "member"),
                 )
                 added_members.append({
                     "member_id": sid,
                     "member_type": "student",
-                    "role": role
+                    "role": "member"
                 })
             
             conn.commit()
@@ -857,28 +911,36 @@ async def add_group_member(
             if member_id is None:
                 raise HTTPException(status_code=400, detail="必须提供 member_id 或 student_ids")
             
-            # 检查成员是否存在
-            table_map = {"student": "`students`", "teacher": "`teachers`", "admin": "`admins`"}
-            table = table_map[member_type]
-            cursor.execute(f"SELECT 1 FROM {table} WHERE `id` = %s", (member_id,))
+            # 检查学生是否存在
+            cursor.execute("SELECT 1 FROM `students` WHERE `id` = %s", (member_id,))
             if not cursor.fetchone():
-                raise HTTPException(status_code=404, detail=f"{member_type} ID {member_id} 不存在")
+                raise HTTPException(status_code=404, detail=f"学生ID {member_id} 不存在")
             
-            # insert as active member
+            # 检查师生关系：如果是教师操作，确保学生是该教师的学生
+            if "teacher" in roles_norm or "教师" in roles_norm:
+                teacher_id = cu.get("sub", 0)
+                cursor.execute(
+                    "SELECT 1 FROM `papers` WHERE `owner_id` = %s AND `teacher_id` = %s",
+                    (member_id, teacher_id)
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=403, detail="只能添加自己班级的学生")
+            
+            # insert as active member，所有成员默认为普通成员
             cursor.execute(
                 """
                 INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`)
                 VALUES (%s, %s, %s, %s, 1, NOW())
                 ON DUPLICATE KEY UPDATE `is_active` = 1, `role` = VALUES(`role`), `updated_at`=NOW()
                 """,
-                (group_id, member_id, member_type, role),
+                (group_id, member_id, "student", "member"),
             )
             conn.commit()
             return {
                 "group_id": group_id,
                 "member_id": member_id,
-                "member_type": member_type,
-                "role": role,
+                "member_type": "student",
+                "role": "member",
                 "message": "成员已添加/更新",
             }
     except HTTPException:
@@ -915,13 +977,19 @@ async def remove_group_member(group_id: str, payload: GroupMember):
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="群组不存在")
-        # permission check for remover
-        cursor.execute(
-            "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `role` IN ('owner','admin') AND `is_active`=1",
-            (group_id, cu.get("sub", 0)),
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="只有群主或群组管理员可移除成员")
+        # 检查权限：教师或管理员可移除成员
+        roles_norm = _normalize_roles(cu.get("roles", []))
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        else:
+            # 教师需要验证是否是该群组的成员
+            cursor.execute(
+                "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`='teacher' AND `is_active`=1",
+                (group_id, cu.get("sub", 0)),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="只有教师或管理员可移除成员")
 
         # check target member exists in group
         cursor.execute(
@@ -931,14 +999,7 @@ async def remove_group_member(group_id: str, payload: GroupMember):
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="成员不在该群组或已被移除")
 
-        # prevent removing the owner except by owner transferring ownership first
-        cursor.execute("SELECT role FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`=%s", (group_id, payload.member_id, payload.member_type))
-        r = cursor.fetchone()
-        role_val = None
-        if r:
-            role_val = r[0] if not isinstance(r, dict) else r.get('role')
-        if role_val == 'owner':
-            raise HTTPException(status_code=403, detail="不能直接移除群主；请先转让群主或由群主解散群组")
+        # 移除防止移除群主的逻辑，不再需要群主设定
 
         cursor.execute(
             "UPDATE `group_members` SET `is_active` = 0 WHERE `group_id` = %s AND `member_id` = %s AND `member_type` = %s",
@@ -1468,69 +1529,7 @@ async def batch_download_papers(
         conn.close()
 
 
-class SetTeacherAdminRequest(BaseModel):
-    """设置教师管理员请求体"""
-    teacher_internal_id: int
-    current_user: CurrentUser
-
-
-@router.post(
-    "/{group_id}/set-teacher-admin",
-    summary="设置群组管理员教师",
-    description="仅群组群主可调用，为指定群组设置管理员教师（将教师添加为群组admin角色）"
-)
-async def set_group_teacher_admin(
-    group_id: str,
-    payload: SetTeacherAdminRequest,
-):
-    cu = _parse_current_user(payload.current_user.model_dump())
-    teacher_internal_id = payload.teacher_internal_id
-    caller_id = cu.get("sub", 0)
-    if not caller_id:
-        raise HTTPException(status_code=403, detail="无效的用户身份信息")
-
-    conn = get_connection()
-    cursor = None
-    try:
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail=f"群组ID {group_id} 不存在")
-        _ensure_caller_is_group_owner(cursor, group_id, caller_id)
-        _validate_teacher_exists(cursor, teacher_internal_id)
-        cursor.execute(
-            """
-            INSERT INTO `group_members` 
-            (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`, `updated_at`)
-            VALUES (%s, %s, 'teacher', 'admin', 1, NOW(), NOW())
-            ON DUPLICATE KEY UPDATE 
-            `role` = 'admin', 
-            `is_active` = 1, 
-            `updated_at` = NOW()
-            """,
-            (group_id, teacher_internal_id)
-        )
-        
-        conn.commit()
-        logger.info(f"群组 {group_id} 群主 {caller_id} 将教师 {teacher_internal_id} 设置为群组管理员")
-        
-        return {
-            "group_id": group_id,
-            "teacher_internal_id": teacher_internal_id,
-            "role": "admin",
-            "message": "成功将该教师设置为群组管理员"
-        }
-    
-    except HTTPException:
-        raise
-    except pymysql.MySQLError as e:
-        conn.rollback()
-        logger.error(f"设置群组管理员教师失败：数据库错误 {str(e)}")
-        raise HTTPException(status_code=500, detail=f"数据库操作失败：{str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        conn.close()
+# 移除设置群组管理员教师的功能，不再需要群组管理员设定
 
 
 @router.get(
@@ -1551,18 +1550,19 @@ def get_reviewed_paper_count(
     try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         _ensure_caller_identity(cursor, cu)
-        cursor.execute(
-            """
-            SELECT 1 FROM `group_members` 
-            WHERE `group_id`=%s AND `member_id`=%s 
-            AND (`role`='owner' OR `role`='admin') 
-            AND `member_type` IN ('teacher', 'admin') 
-            AND `is_active`=1
-            """,
-            (group_id, caller_id)
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="仅该群组的群主或管理员教师可查看已审阅论文数")
+        # 检查权限：教师或管理员可查看已审阅论文数
+        roles_norm = _normalize_roles(cu.get("roles", []))
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        else:
+            # 教师需要验证是否是该群组的成员
+            cursor.execute(
+                "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`='teacher' AND `is_active`=1",
+                (group_id, caller_id),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="只有教师或管理员可查看已审阅论文数")
         count_sql = """
         SELECT COUNT(DISTINCT p.id) AS count
         FROM `papers` p
@@ -1607,18 +1607,19 @@ def get_uploaded_paper_count(
     try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         _ensure_caller_identity(cursor, cu)
-        cursor.execute(
-            """
-            SELECT 1 FROM `group_members` 
-            WHERE `group_id`=%s AND `member_id`=%s 
-            AND (`role`='owner' OR `role`='admin') 
-            AND `member_type` IN ('teacher', 'admin') 
-            AND `is_active`=1
-            """,
-            (group_id, caller_id)
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="仅该群组的群主或管理员教师可查看已上传论文数")
+        # 检查权限：教师或管理员可查看已上传论文数
+        roles_norm = _normalize_roles(cu.get("roles", []))
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        else:
+            # 教师需要验证是否是该群组的成员
+            cursor.execute(
+                "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`='teacher' AND `is_active`=1",
+                (group_id, caller_id),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="只有教师或管理员可查看已上传论文数")
         count_sql = """
         SELECT COUNT(DISTINCT p.id) AS count
         FROM `papers` p
@@ -1663,18 +1664,19 @@ def get_unuploaded_paper_members(
     try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         _ensure_caller_identity(cursor, cu)
-        cursor.execute(
-            """
-            SELECT 1 FROM `group_members` 
-            WHERE `group_id`=%s AND `member_id`=%s 
-            AND (`role`='owner' OR `role`='admin') 
-            AND `member_type` IN ('teacher', 'admin') 
-            AND `is_active`=1
-            """,
-            (group_id, caller_id)
-        )
-        if not cursor.fetchone():
-            raise HTTPException(status_code=403, detail="仅该群组的群主或管理员教师可查看未上传论文成员")
+        # 检查权限：教师或管理员可查看未上传论文成员
+        roles_norm = _normalize_roles(cu.get("roles", []))
+        if "admin" in roles_norm:
+            # 管理员拥有所有权限
+            pass
+        else:
+            # 教师需要验证是否是该群组的成员
+            cursor.execute(
+                "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`='teacher' AND `is_active`=1",
+                (group_id, caller_id),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="只有教师或管理员可查看未上传论文成员")
         cursor.execute(
             """
             SELECT gm.member_id, s.student_id, s.name 
