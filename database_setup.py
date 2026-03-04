@@ -50,6 +50,38 @@ DEFAULT_DB_URL = os.getenv(
 )
 
 
+SCHOOLS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `schools` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
+    `school_id` BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '学校唯一标识ID（默认值0，插入时需显式赋值）',
+    `school_name` VARCHAR(128) NOT NULL COMMENT '学校名称',
+    `province` VARCHAR(64) DEFAULT NULL COMMENT '所属省份',
+    `city` VARCHAR(64) DEFAULT NULL COMMENT '所属城市',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_school_id` (`school_id`),
+    KEY `idx_school_name` (`school_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='学校信息表';
+"""
+
+
+DEPARTMENTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `departments` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
+    `department_id` BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '院系唯一标识ID',
+    `department_name` VARCHAR(128) NOT NULL COMMENT '院系名称',
+    `school_id` BIGINT UNSIGNED NOT NULL COMMENT '所属学校ID（关联schools表的school_id）',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_department_id` (`department_id`),
+    KEY `idx_department_name` (`department_name`),
+    KEY `idx_department_school_id` (`school_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='院系信息表';
+"""
+
+
 STUDENTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `students` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
@@ -60,6 +92,10 @@ CREATE TABLE IF NOT EXISTS `students` (
     `password` VARCHAR(255) NOT NULL COMMENT '密码哈希',
     `grade` VARCHAR(64) DEFAULT NULL COMMENT '年级',
     `class_name` VARCHAR(64) DEFAULT NULL COMMENT '班级',
+    `school_id` BIGINT UNSIGNED NULL COMMENT '所属学校ID',
+    `school_name` VARCHAR(128) NULL COMMENT '学校名称',
+    `department_id` BIGINT UNSIGNED NULL COMMENT '所属院系ID',
+    `department_name` VARCHAR(128) NULL COMMENT '院系名称',
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     PRIMARY KEY (`id`),
@@ -68,10 +104,11 @@ CREATE TABLE IF NOT EXISTS `students` (
     KEY `idx_student_phone` (`phone`),
     KEY `idx_student_email` (`email`),
     KEY `idx_grade` (`grade`),
-    KEY `idx_class_name` (`class_name`)
+    KEY `idx_class_name` (`class_name`),
+    KEY `idx_student_school_id` (`school_id`),
+    KEY `idx_student_department_id` (`department_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='学生信息表';
 """
-
 
 TEACHERS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `teachers` (
@@ -81,8 +118,12 @@ CREATE TABLE IF NOT EXISTS `teachers` (
     `phone` VARCHAR(32) DEFAULT NULL COMMENT '联系电话',
     `email` VARCHAR(255) DEFAULT NULL COMMENT '邮箱',
     `password` VARCHAR(255) NOT NULL COMMENT '密码哈希',
-    `department` VARCHAR(128) DEFAULT NULL COMMENT '院系/部门',
+    `department` VARCHAR(128) DEFAULT NULL COMMENT '院系/部门（兼容原有字段）',
     `title` VARCHAR(64) DEFAULT NULL COMMENT '职称',
+    `school_id` BIGINT UNSIGNED NULL COMMENT '所属学校ID',
+    `school_name` VARCHAR(128) NULL COMMENT '学校名称',
+    `department_id` BIGINT UNSIGNED NULL COMMENT '所属院系ID',
+    `department_name` VARCHAR(128) NULL COMMENT '院系名称',
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     PRIMARY KEY (`id`),
@@ -90,10 +131,11 @@ CREATE TABLE IF NOT EXISTS `teachers` (
     KEY `idx_name` (`name`),
     KEY `idx_teacher_phone` (`phone`),
     KEY `idx_teacher_email` (`email`),
-    KEY `idx_department` (`department`)
+    KEY `idx_department` (`department`),
+    KEY `idx_teacher_school_id` (`school_id`),
+    KEY `idx_teacher_department_id` (`department_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='教师信息表';
 """
-
 
 ADMINS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `admins` (
@@ -104,6 +146,10 @@ CREATE TABLE IF NOT EXISTS `admins` (
     `email` VARCHAR(255) DEFAULT NULL COMMENT '邮箱',
     `password` VARCHAR(255) NOT NULL COMMENT '密码哈希',
     `role` VARCHAR(64) NOT NULL DEFAULT 'admin' COMMENT '管理员角色',
+    `school_id` BIGINT UNSIGNED NULL COMMENT '所属学校ID',
+    `school_name` VARCHAR(128) NULL COMMENT '学校名称',
+    `department_id` BIGINT UNSIGNED NULL COMMENT '所属院系ID',
+    `department_name` VARCHAR(128) NULL COMMENT '院系名称',
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     PRIMARY KEY (`id`),
@@ -111,7 +157,9 @@ CREATE TABLE IF NOT EXISTS `admins` (
     KEY `idx_name` (`name`),
     KEY `idx_admin_phone` (`phone`),
     KEY `idx_admin_email` (`email`),
-    KEY `idx_role` (`role`)
+    KEY `idx_role` (`role`),
+    KEY `idx_admin_school_id` (`school_id`),
+    KEY `idx_admin_department_id` (`department_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='管理员信息表';
 """
 

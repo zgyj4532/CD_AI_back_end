@@ -5,7 +5,7 @@ import csv
 import io
 import pymysql
 from typing import List, Optional 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from app.schemas.user import (
     StudentCreate,
@@ -217,6 +217,305 @@ def _fetch_user(cursor: pymysql.cursors.Cursor, user_id: int, user_type: str) ->
         "created_at": row[5] if isinstance(row[5], str) else row[5].strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at": row[6] if isinstance(row[6], str) else row[6].strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+class SchoolCreateRequest(BaseModel):
+    """录入学校请求"""
+    school_name: str = Field(..., min_length=1, description="学校名称，不能为空")
+    province: Optional[str] = Field(None, description="所属省份")
+    city: Optional[str] = Field(None, description="所属城市")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "school_name": "清华大学",
+                "province": "北京市",
+                "city": "北京市"
+            }
+        }
+    }
+
+class DepartmentCreateRequest(BaseModel):
+    """录入院系请求"""
+    school_id: int = Field(..., gt=0, description="学校ID（关联schools表的school_id），必须大于0")
+    department_name: str = Field(..., min_length=1, description="院系名称，不能为空")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "school_id": 1,
+                "department_name": "计算机科学与技术系"
+            }
+        }
+    }
+
+class SchoolIdQueryRequest(BaseModel):
+    """学校ID查询请求"""
+    school_name: str = Field(..., min_length=1, description="学校名称，不能为空")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "school_name": "清华大学"
+            }
+        }
+    }
+
+class DepartmentIdQueryRequest(BaseModel):
+    """院系ID查询请求"""
+    school_id: int = Field(..., gt=0, description="学校ID，必须大于0")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "school_id": 1
+            }
+        }
+    }
+
+router = APIRouter()
+
+# ===== 核心修复：生成业务唯一ID的工具函数 =====
+def _get_next_business_id(
+    cursor: pymysql.cursors.DictCursor, 
+    table: str, 
+    id_field: str
+) -> int:
+    """
+    获取下一个业务唯一ID（基于当前最大值+1）
+    :param cursor: 数据库游标
+    :param table: 表名
+    :param id_field: 业务ID字段名（如school_id/department_id）
+    :return: 下一个可用的业务ID
+    """
+    cursor.execute(f"SELECT MAX({id_field}) as max_id FROM {table}")
+    result = cursor.fetchone()
+    max_id = result.get("max_id") or 0
+    return max_id + 1
+
+# ===== 接口实现 =====
+@router.post(
+    "/schools",
+    summary="录入学校（管理员）",
+    description="管理员录入学校信息，自动生成业务唯一ID，仅管理员可用",
+)
+def create_school(
+    payload: SchoolCreateRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
+):
+    # 解析当前用户信息
+    current_user_info = _parse_current_user(current_user)
+    # 验证当前用户是管理员
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        school_name = payload.school_name.strip()
+        province = payload.province.strip() if payload.province else None
+        city = payload.city.strip() if payload.city else None
+        
+        # 检查学校名称是否已存在（防止重复录入）
+        cursor.execute(
+            "SELECT school_id FROM schools WHERE school_name = %s",
+            (school_name,)
+        )
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"学校「{school_name}」已存在")
+        
+        # 核心修复1：生成唯一的school_id（业务标识）
+        new_school_id = _get_next_business_id(cursor, "schools", "school_id")
+        
+        # 核心修复2：显式赋值school_id，而非依赖默认值0
+        cursor.execute(
+            """
+            INSERT INTO schools (school_id, school_name, province, city)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (new_school_id, school_name, province, city)
+        )
+        db.commit()
+        
+        return {
+            "code": 200,
+            "message": "学校录入成功",
+            "data": {
+                "school_id": new_school_id,  # 返回业务标识，而非主键id
+                "school_name": school_name,
+                "province": province,
+                "city": city
+            }
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"录入学校数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"学校录入失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+@router.post(
+    "/departments",
+    summary="录入院系（管理员）",
+    description="管理员录入院系信息，关联学校ID，自动生成业务唯一ID，仅管理员可用",
+)
+def create_department(
+    payload: DepartmentCreateRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
+):
+    # 解析当前用户信息
+    current_user_info = _parse_current_user(current_user)
+    # 验证当前用户是管理员
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        school_id = payload.school_id
+        department_name = payload.department_name.strip()
+        
+        # 检查学校是否存在（关联schools表的业务标识school_id）
+        cursor.execute("SELECT school_id FROM schools WHERE school_id = %s", (school_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"学校ID {school_id} 不存在")
+        
+        # 检查该学校下院系名称是否已存在
+        cursor.execute(
+            "SELECT department_id FROM departments WHERE school_id = %s AND department_name = %s",
+            (school_id, department_name)
+        )
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"学校ID {school_id} 下已存在院系「{department_name}」")
+        
+        # 核心修复1：生成唯一的department_id（业务标识）
+        new_department_id = _get_next_business_id(cursor, "departments", "department_id")
+        
+        # 核心修复2：显式赋值department_id，而非依赖默认值0
+        cursor.execute(
+            """
+            INSERT INTO departments (department_id, school_id, department_name)
+            VALUES (%s, %s, %s)
+            """,
+            (new_department_id, school_id, department_name)
+        )
+        db.commit()
+        
+        return {
+            "code": 200,
+            "message": "院系录入成功",
+            "data": {
+                "department_id": new_department_id,  # 返回业务标识，而非主键id
+                "school_id": school_id,
+                "department_name": department_name
+            }
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"录入院系数据库错误: {str(e)}")
+        # 更精准的异常提示
+        if "Duplicate entry" in str(e):
+            raise HTTPException(status_code=400, detail="院系ID生成冲突，请重试")
+        raise HTTPException(status_code=500, detail=f"院系录入失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.post(
+    "/schools/query-id",
+    summary="查询学校ID（公开）",
+    description="输入学校名称查询对应的学校ID，任何人可访问",
+)
+def query_school_id(
+    payload: SchoolIdQueryRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        school_name = payload.school_name.strip()
+        
+        cursor.execute(
+            "SELECT id as school_id, school_name FROM schools WHERE school_name = %s",
+            (school_name,)
+        )
+        result = cursor.fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail=f"未查询到学校「{school_name}」的ID")
+        
+        return {
+            "code": 200,
+            "message": "查询成功",
+            "data": result
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        logger.error(f"查询学校ID数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="学校ID查询失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+@router.post(
+    "/departments/query-by-school",
+    summary="查询院系ID（公开）",
+    description="输入学校ID查询该学校下所有院系及对应ID，任何人可访问",
+)
+def query_departments_by_school(
+    payload: DepartmentIdQueryRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        school_id = payload.school_id
+        
+        # 先检查学校是否存在
+        cursor.execute("SELECT id FROM schools WHERE id = %s", (school_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"学校ID {school_id} 不存在")
+        
+        # 查询该学校下所有院系
+        cursor.execute(
+            """
+            SELECT id as department_id, department_name, school_id
+            FROM departments WHERE school_id = %s
+            ORDER BY department_id ASC
+            """,
+            (school_id,)
+        )
+        results = cursor.fetchall()
+        if not results:
+            return {
+                "code": 200,
+                "message": f"学校ID {school_id} 下暂无院系信息",
+                "data": []
+            }
+        
+        return {
+            "code": 200,
+            "message": "查询成功",
+            "data": results
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        logger.error(f"查询院系ID数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="院系ID查询失败")
+    finally:
+        if cursor:
+            cursor.close()
+
 
 
 @router.get(
@@ -1021,45 +1320,87 @@ def bind_group(user_id: int, payload: UserBindGroup, db: pymysql.connections.Con
             cursor.close()
 
 
+def _validate_school_exists(cursor: pymysql.cursors.Cursor, school_id: int) -> bool:
+    """校验学校ID是否存在"""
+    cursor.execute("SELECT 1 FROM schools WHERE school_id = %s LIMIT 1", (school_id,))
+    return bool(cursor.fetchone())
+
+def _validate_department_exists(cursor: pymysql.cursors.Cursor, department_id: int) -> bool:
+    """校验院系ID是否存在"""
+    cursor.execute("SELECT 1 FROM departments WHERE department_id = %s LIMIT 1", (department_id,))
+    return bool(cursor.fetchone())
+
+def _get_school_name_by_id(cursor: pymysql.cursors.Cursor, school_id: int) -> str | None:
+    """根据学校ID获取学校名称"""
+    cursor.execute("SELECT school_name FROM schools WHERE school_id = %s LIMIT 1", (school_id,))
+    row = cursor.fetchone()
+    return row["school_name"] if row else None
+
+def _get_department_name_by_id(cursor: pymysql.cursors.Cursor, department_id: int) -> str | None:
+    """根据院系ID获取院系名称"""
+    cursor.execute("SELECT department_name FROM departments WHERE department_id = %s LIMIT 1", (department_id,))
+    row = cursor.fetchone()
+    return row["department_name"] if row else None
+
+# ========== 绑定学校接口 ==========
 @router.put(
     "/{user_id}/bind-school",
     response_model=UserOut,
     summary="绑定用户学校",
-    description="为指定用户绑定/更新所属学校信息"
+    description="为指定用户绑定/更新所属学校信息（仅管理员可操作）"
 )
 def bind_school(
     user_id: int,
     payload: UserBindSchool,
     db: pymysql.connections.Connection = Depends(get_db),
-    user_type: str = Query("admin"),
+    user_type: str = Query("admin", description="用户类型：student/teacher/admin"),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
 ):
+    # 1. 校验管理员权限
+    current_user_info = _parse_current_user(current_user)
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 2. 标准化用户类型 & 校验用户是否存在
         user_type = _normalize_user_type(user_type)
         table = USER_TABLES[user_type]["table"]
-        cursor.execute(f"SELECT id FROM {table} WHERE id = %s", (user_id,))
+        cursor.execute(f"SELECT id FROM {table} WHERE id = %s LIMIT 1", (user_id,))
         if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="用户不存在")
-        cursor.execute("SELECT 1 FROM schools WHERE school_id = %s", (payload.school_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="学校不存在")
-        update_fields = ["school_id = %s", "updated_at = NOW()"]
-        update_params = [payload.school_id]
-        if payload.school_name:
-            update_fields.append("school_name = %s")
-            update_params.append(payload.school_name.strip())
+            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
         
-        update_params.append(user_id)
+        # 3. 校验学校ID是否存在
+        if not _validate_school_exists(cursor, payload.school_id):
+            raise HTTPException(status_code=404, detail="学校不存在")
+        
+        # 4. 强制从数据库获取学校名称（不再使用传入的名称）
+        school_name = _get_school_name_by_id(cursor, payload.school_id)
+        if not school_name:
+            raise HTTPException(status_code=500, detail="无法获取学校名称")
+        
+        # 5. 构造更新语句
+        update_fields = [
+            "school_id = %s",
+            "school_name = %s",
+            "updated_at = NOW()"
+        ]
+        update_params = [payload.school_id, school_name, user_id]
+        
+        # 6. 执行更新
         cursor.execute(
             f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = %s",
             tuple(update_params)
         )
         db.commit()
-        updated = _fetch_user(cursor, user_id, user_type)
-        if not updated:
+        
+        # 7. 查询更新后用户信息并返回
+        updated_user = _fetch_user(cursor, user_id, user_type)
+        if not updated_user:
             raise HTTPException(status_code=500, detail="绑定学校后查询用户信息失败")
-        return UserOut(**updated)
+        return UserOut(**updated_user)
     
     except HTTPException:
         raise
@@ -1071,45 +1412,72 @@ def bind_school(
         if cursor:
             cursor.close()
 
+# ========== 绑定院系接口 ==========
 @router.put(
     "/{user_id}/bind-department",
     response_model=UserOut,
     summary="绑定用户院系",
-    description="为指定用户绑定/更新所属院系信息"
+    description="为指定用户绑定/更新所属院系信息（仅管理员可操作）"
 )
 def bind_department(
     user_id: int,
     payload: UserBindDepartment,
     db: pymysql.connections.Connection = Depends(get_db),
-    user_type: str = Query("admin"),
+    user_type: str = Query("admin", description="用户类型：student/teacher/admin"),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
 ):
+    # 1. 校验管理员权限
+    current_user_info = _parse_current_user(current_user)
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 2. 标准化用户类型 & 校验用户是否存在
         user_type = _normalize_user_type(user_type)
         table = USER_TABLES[user_type]["table"]
-        cursor.execute(f"SELECT id FROM {table} WHERE id = %s", (user_id,))
+        cursor.execute(f"SELECT id FROM {table} WHERE id = %s LIMIT 1", (user_id,))
         if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="用户不存在")
-        cursor.execute("SELECT 1 FROM departments WHERE department_id = %s", (payload.department_id,))
-        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
+        
+        # 3. 校验院系ID是否存在
+        if not _validate_department_exists(cursor, payload.department_id):
             raise HTTPException(status_code=404, detail="院系不存在")
-        update_fields = ["department_id = %s", "updated_at = NOW()"]
-        update_params = [payload.department_id]
-        if payload.department_name:
-            update_fields.append("department_name = %s")
-            update_params.append(payload.department_name.strip())
+        
+        # 4. 强制从数据库获取院系名称（不再使用传入的名称）
+        dept_name = _get_department_name_by_id(cursor, payload.department_id)
+        if not dept_name:
+            raise HTTPException(status_code=500, detail="无法获取院系名称")
+        
+        # 5. 构造更新语句（兼容教师表原有department字段）
+        update_fields = [
+            "department_id = %s",
+            "department_name = %s",
+            "updated_at = NOW()"
+        ]
+        update_params = [payload.department_id, dept_name]
+        
+        # 兼容教师表的department字段（同步更新）
+        if user_type == "teacher":
+            update_fields.append("department = %s")
+            update_params.append(dept_name)
         
         update_params.append(user_id)
+        
+        # 6. 执行更新
         cursor.execute(
             f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = %s",
             tuple(update_params)
         )
         db.commit()
-        updated = _fetch_user(cursor, user_id, user_type)
-        if not updated:
+        
+        # 7. 查询更新后用户信息并返回
+        updated_user = _fetch_user(cursor, user_id, user_type)
+        if not updated_user:
             raise HTTPException(status_code=500, detail="绑定院系后查询用户信息失败")
-        return UserOut(**updated)
+        return UserOut(**updated_user)
     
     except HTTPException:
         raise
