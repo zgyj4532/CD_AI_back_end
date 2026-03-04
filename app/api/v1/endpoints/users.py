@@ -426,6 +426,78 @@ def change_password(
             cursor.close()
 
 
+class ResetPasswordRequest(BaseModel):
+    """重置密码请求"""
+    user_id: int
+    user_type: str  # student/teacher/admin
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "user_id": 1,
+                "user_type": "student"
+            }
+        }
+    }
+
+
+@router.post(
+    "/reset-password",
+    summary="重置用户密码",
+    description="管理员重置指定用户类型和ID的用户密码为123456"
+)
+def reset_user_password(
+    payload: ResetPasswordRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
+):
+    # 解析当前用户信息
+    current_user_info = _parse_current_user(current_user)
+    # 验证当前用户是管理员
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    
+    cursor = None
+    try:
+        # 标准化用户类型
+        user_type = _normalize_user_type(payload.user_type)
+        info = USER_TABLES[user_type]
+        table = info["table"]
+        
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        
+        # 检查用户是否存在
+        cursor.execute(f"SELECT id FROM {table} WHERE id = %s", (payload.user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
+        
+        # 重置密码为123456（加密存储）
+        default_password = "123456"
+        password_hash = get_password_hash(default_password)
+        
+        cursor.execute(
+            f"UPDATE {table} SET password = %s, updated_at = NOW() WHERE id = %s",
+            (password_hash, payload.user_id)
+        )
+        db.commit()
+        
+        return {
+            "message": f"{user_type}用户密码已重置为123456",
+            "user_id": payload.user_id,
+            "user_type": user_type
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"重置用户密码数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="重置密码失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
 @router.post(
     "/students",
     response_model=UserOut,
