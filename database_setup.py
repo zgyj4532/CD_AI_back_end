@@ -658,8 +658,20 @@ TABLE_COLUMN_DEFINITIONS = {
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
         "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'success' COMMENT '操作状态（success/failure）'",
     },
+    "user_messages": {
+        "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '消息ID'",
+        "user_id": "`user_id` VARCHAR(64) NOT NULL COMMENT '接收用户ID'",
+        "username": "`username` VARCHAR(64) DEFAULT NULL COMMENT '接收用户名'",
+        "title": "`title` VARCHAR(255) NOT NULL COMMENT '消息标题'",
+        "content": "`content` TEXT NOT NULL COMMENT '消息内容'",
+        "source": "`source` VARCHAR(64) DEFAULT NULL COMMENT '来源（系统/业务模块）'",
+        "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'unread' COMMENT '状态（unread/read）'",
+        "received_time": "`received_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '接收时间'",
+        "metadata": "`metadata` JSON DEFAULT NULL COMMENT '扩展元数据'",
+        "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
+        "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
+    },
 }
-
 
 TABLE_INDEX_DEFINITIONS = {
     "schools": [

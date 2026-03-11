@@ -1,6 +1,6 @@
 import zipfile
 import urllib.parse
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Query,Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query,Body
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
 import os
@@ -11,16 +11,12 @@ import subprocess
 import tempfile
 from app.core.dependencies import get_current_user
 from app.schemas.document import (
-    PaperCreate,
     PaperOut,
-    PaperStatusCreate,
     PaperStatusOut,
-    PaperStatusUpdate,
     VersionOut,
     DDLOut, 
-    DDLCreate, 
 )
-from app.services.oss import upload_file_to_oss, get_file_from_oss, upload_paper_to_storage
+from app.services.oss import get_file_from_oss, upload_paper_to_storage
 from datetime import datetime
 from app.database import get_db
 import pymysql
@@ -161,6 +157,7 @@ async def upload_paper(
 ):
     current_user = _parse_current_user(current_user)
     submitter_id = current_user.get("sub", 0)  
+    # 参数校验
     if not isinstance(owner_id, int) or owner_id <= 0:
         raise HTTPException(status_code=400, detail="owner_id必须是正整数")
     if not isinstance(teacher_id, int) or teacher_id <= 0:
@@ -196,7 +193,7 @@ async def upload_paper(
         version = "v1.0"
         paper_sql = """
         INSERT INTO papers (
-            owner_id, teacher_id, latest_version, version, size, status, oss_key, pdf_oss_key,
+            owner_id, teacher_id, version, size, status, ddl, oss_key, pdf_oss_key,
             submitted_by_name, submitted_by_role, created_at, updated_at
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -207,9 +204,9 @@ async def upload_paper(
                 owner_id,
                 teacher_id,
                 version,
-                version,
                 size,
                 "已上传",
+                None,
                 oss_key,
                 pdf_oss_key,
                 submitter_name,
@@ -219,6 +216,7 @@ async def upload_paper(
             ),
         )
         paper_id = cursor.lastrowid
+        # 插入历史版本表
         history_sql = """
         INSERT INTO papers_history (
             paper_id, version, size, status, oss_key, pdf_oss_key,
@@ -271,6 +269,7 @@ async def update_paper(
 ):
     current_user = _parse_current_user(current_user)
     submitter_id = current_user.get("sub", 0)
+    # 文件校验
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="仅支持 .docx 格式")
     contents = await file.read()
@@ -283,13 +282,16 @@ async def update_paper(
     cursor = None
     try:
         cursor = db.cursor()
-        cursor.execute("SELECT owner_id, latest_version, teacher_id FROM papers WHERE id = %s", (paper_id,))
+        # 查询论文信息（仅查表中存在的字段）
+        cursor.execute("SELECT owner_id, version, teacher_id FROM papers WHERE id = %s", (paper_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="论文不存在")
         paper_owner_id, current_version_str, teacher_id = row
+        # 权限校验
         if paper_owner_id != submitter_id:
             raise HTTPException(status_code=403, detail="无权限更新该论文")
+        # 版本号校验
         current_version = _parse_version(current_version_str)
         new_version = _parse_version(version)
         if new_version <= current_version:
@@ -298,13 +300,12 @@ async def update_paper(
                 detail=f"新版本号必须大于当前最新版本号 {current_version_str}，当前提交的版本号 {version} 不符合要求"
             )
         
-        # 上传docx文件
+        # 上传文件
         oss_key = upload_paper_to_storage(file.filename, contents)
-        
-        # 转换docx到pdf并上传到OSS
         pdf_content, pdf_filename = convert_docx_to_pdf(contents, file.filename)
         pdf_oss_key = upload_paper_to_storage(pdf_filename, pdf_content)
 
+        # 数据库更新
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         submitter_name = current_user.get("username") or ""
         roles = current_user.get("roles") or []
@@ -313,8 +314,7 @@ async def update_paper(
         cursor.execute(
             """
             UPDATE papers
-            SET latest_version = %s,
-                version = %s,
+            SET version = %s,
                 size = %s,
                 status = %s,
                 submitted_by_name = %s,
@@ -328,7 +328,6 @@ async def update_paper(
             """,
             (
                 version,
-                version,
                 size,
                 "已更新",
                 submitter_name,
@@ -341,6 +340,7 @@ async def update_paper(
                 paper_id,
             ),
         )
+        # 插入历史版本
         history_sql = """
         INSERT INTO papers_history (
             paper_id, version, size, status, oss_key, pdf_oss_key,
@@ -396,11 +396,13 @@ def delete_paper(
     cursor = None
     try:
         cursor = db.cursor()
+        # 查询论文信息
         cursor.execute("SELECT owner_id, teacher_id FROM papers WHERE id = %s", (paper_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="论文不存在")
         paper_owner_id, teacher_id = row
+        # 权限校验
         is_owner = (paper_owner_id == current_id)
         is_admin = ("admin" in current_roles) or ("管理员" in current_roles)
         if not is_owner and not is_admin:
@@ -408,6 +410,7 @@ def delete_paper(
                 status_code=403,
                 detail=f"无权限删除该论文：仅论文归属者（ID={paper_owner_id}）或管理员可删除，当前登录用户ID={current_id}，角色={current_roles}"
             )
+        # 删除论文
         cursor.execute("DELETE FROM papers WHERE id = %s", (paper_id,))
         db.commit()
         delete_type = "归属者" if is_owner else "管理员"
@@ -948,16 +951,21 @@ async def list_student_papers(
     current_user = _parse_current_user(current_user)
     login_user_id = current_user.get("sub", 0)  
     current_roles = current_user.get("roles", [])
+    
+    # 1. 参数校验
     if not isinstance(owner_id, int) or owner_id <= 0:
         raise HTTPException(status_code=400, detail="owner_id必须是正整数")
     
+    # 2. 权限校验
     cursor_check = None
     try:
         cursor_check = db.cursor()
+        # 查询该学生论文关联的教师ID（用于判断是否是指导老师）
         cursor_check.execute("SELECT teacher_id FROM papers WHERE owner_id = %s LIMIT 1", (owner_id,))
         paper_teacher_id = cursor_check.fetchone()
         paper_teacher_id = paper_teacher_id[0] if paper_teacher_id else 0
         
+        # 权限判断：本人/指导老师/管理员
         is_owner = (owner_id == login_user_id)
         is_teacher = (paper_teacher_id == login_user_id)
         is_admin = ("admin" in current_roles) or ("管理员" in current_roles)
@@ -971,11 +979,12 @@ async def list_student_papers(
         if cursor_check:
             cursor_check.close()
     
+    # 3. 数据库查询（新增 pdf_oss_key，修正 latest_version 为 version）
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor) 
         query_sql = """
-        SELECT id, owner_id, teacher_id, latest_version, oss_key, created_at, updated_at
+        SELECT id, owner_id, teacher_id, version, oss_key, pdf_oss_key, created_at, updated_at
         FROM papers 
         WHERE owner_id = %s 
         ORDER BY created_at DESC
@@ -983,6 +992,7 @@ async def list_student_papers(
         cursor.execute(query_sql, (owner_id,))
         paper_records = cursor.fetchall()
         
+        # 4. 构造返回结果（新增 pdf_oss_key 字段，version 映射为 latest_version）
         result = []
         for record in paper_records:
             result.append(
@@ -990,8 +1000,9 @@ async def list_student_papers(
                     id=record["id"],
                     owner_id=record["owner_id"],
                     teacher_id=record["teacher_id"],
-                    latest_version=record["latest_version"],
-                    oss_key=record["oss_key"]
+                    latest_version=record["version"],  # 数据库的 version 对应响应的 latest_version
+                    oss_key=record["oss_key"],
+                    pdf_oss_key=record["pdf_oss_key"]  # 新增返回 PDF 存储键
                 )
             )
         return result
@@ -1125,6 +1136,7 @@ def create_ddl(
     login_user_id = current_user.get("sub", 0)
     login_user_roles = current_user.get("roles", [])
     teacher_name = current_user.get("username", "") 
+    # 基础校验
     if not teacher_name:
         raise HTTPException(status_code=400, detail="教师姓名不能为空")
 
@@ -1139,6 +1151,7 @@ def create_ddl(
             status_code=403,
             detail=f"无权限创建DDL：传入的教师ID({teacher_id})与登录用户ID({login_user_id})不一致"
         )
+    # 时间参数转换与校验
     try:
         year_int = int(year)
         month_int = int(month)
@@ -1155,24 +1168,28 @@ def create_ddl(
     now = datetime.now()
     if ddl_time < now:
         raise HTTPException(status_code=400, detail="DDL截止时间不能早于当前时间")
+    # 数据库操作
     cursor = None
     try:
         cursor = db.cursor()
         create_sql = """
-        INSERT INTO ddl_management (creator_id, teacher_id, teacher_name, ddl_time, created_at)
+        INSERT INTO ddl_management (teacher_id, teacher_name, ddl_time, created_at, updated_at)
         VALUES (%s, %s, %s, %s, %s)
         """
         create_time = now.strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(create_sql, (login_user_id, teacher_id, teacher_name, ddl_time, create_time))
+        cursor.execute(
+            create_sql, 
+            (teacher_id, teacher_name, ddl_time, create_time, create_time)
+        )
         ddlid = cursor.lastrowid
         db.commit()
         return DDLOut(
             ddlid=ddlid,
-            creator_id=login_user_id,
             teacher_id=teacher_id,
-            teacher_name=teacher_name, 
+            teacher_name=teacher_name,
             ddl_time=ddl_time.strftime("%Y-%m-%d %H:%M:%S"),
-            created_at=create_time
+            created_at=create_time,
+            updated_at=create_time
         )
     except pymysql.MySQLError as e:
         db.rollback()
@@ -1195,21 +1212,24 @@ def list_ddl(
     current_user = _parse_current_user(current_user)
     login_user_id = current_user.get("sub", 0)
     login_user_roles = current_user.get("roles", [])
+    # 基础校验
     if login_user_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录后再操作")
     if not isinstance(teacher_id, int) or teacher_id <= 0:
         raise HTTPException(status_code=400, detail="teacher_id必须是正整数")
+    # 权限校验
     is_admin = "admin" in login_user_roles or "管理员" in login_user_roles
     if teacher_id != login_user_id and not is_admin:
         raise HTTPException(
             status_code=403,
             detail=f"无权限查看：仅可查看自己创建的DDL或管理员查看，传入的teacher_id({teacher_id})与登录用户ID({login_user_id})不一致"
         )
+    # 数据库查询
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         query_sql = """
-        SELECT ddlid, creator_id, teacher_id, teacher_name, ddl_time, created_at
+        SELECT ddlid, teacher_id, teacher_name, ddl_time, created_at, updated_at
         FROM ddl_management 
         WHERE teacher_id = %s 
         ORDER BY ddl_time DESC
@@ -1218,15 +1238,19 @@ def list_ddl(
         ddl_records = cursor.fetchall()
         result = []
         for record in ddl_records:
+            # 处理datetime对象转字符串
+            ddl_time_str = record["ddl_time"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["ddl_time"], datetime) else record["ddl_time"]
+            created_at_str = record["created_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["created_at"], datetime) else record["created_at"]
+            updated_at_str = record["updated_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["updated_at"], datetime) else record["updated_at"]
+            
             result.append(DDLOut(
                 ddlid=record["ddlid"],
-                creator_id=record["creator_id"],
                 teacher_id=record["teacher_id"],
-                teacher_name=record["teacher_name"], 
-                ddl_time=record["ddl_time"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["ddl_time"], datetime) else record["ddl_time"],
-                created_at=record["created_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["created_at"], datetime) else record["created_at"]
+                teacher_name=record["teacher_name"],
+                ddl_time=ddl_time_str,
+                created_at=created_at_str,
+                updated_at=updated_at_str
             ))
-        return result
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"查询DDL失败：{str(e)}")
     finally:
@@ -1246,20 +1270,23 @@ def delete_ddl(
     current_user = _parse_current_user(current_user)
     login_user_id = current_user.get("sub", 0)
     login_user_roles = current_user.get("roles", [])
+    # 基础校验
     if login_user_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录后再操作")
     if not isinstance(ddlid, int) or ddlid <= 0:
         raise HTTPException(status_code=400, detail="ddlid必须是正整数")
+    # 数据库操作
     cursor = None
     try:
         cursor = db.cursor()
+        # 校验DDL是否存在并获取创建者
         check_sql = "SELECT teacher_id, teacher_name FROM ddl_management WHERE ddlid = %s"
         cursor.execute(check_sql, (ddlid,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"DDL ID {ddlid} 不存在")
-        ddl_teacher_id = row[0]
-
+        ddl_teacher_id, ddl_teacher_name = row
+        # 权限校验
         is_admin = "admin" in login_user_roles or "管理员" in login_user_roles
         is_owner = ddl_teacher_id == login_user_id
         
@@ -1268,6 +1295,7 @@ def delete_ddl(
                 status_code=403,
                 detail=f"无权限删除：仅创建该DDL的教师（ID={ddl_teacher_id}）或管理员可删除，当前登录用户ID={login_user_id}"
             )
+        # 删除操作
         delete_sql = "DELETE FROM ddl_management WHERE ddlid = %s"
         cursor.execute(delete_sql, (ddlid,))
         db.commit()
@@ -1276,11 +1304,137 @@ def delete_ddl(
             "message": f"DDL {ddlid} 删除成功",
             "ddlid": ddlid,
             "deleted_by": login_user_id,
-            "deleted_by_role": login_user_roles
+            "deleted_by_role": login_user_roles,
+            "deleted_teacher_info": {"teacher_id": ddl_teacher_id, "teacher_name": ddl_teacher_name}
         }
     except pymysql.MySQLError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除DDL失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+@router.put(
+    "/ddl/{ddlid}",
+    response_model=DDLOut,
+    summary="更新DDL截止时间",
+    description="仅创建该DDL的教师可更新，或管理员可更新，新截止时间需晚于当前时间"
+)
+def update_ddl(
+    ddlid: int,
+    year: str = Query(
+        ..., 
+        description="新DDL年份（可选值：2024-2100）",
+        enum=[str(y) for y in range(2024, 2101)]
+    ),
+    month: str = Query(
+        ..., 
+        description="新DDL月份（可选值：1-12）",
+        enum=[str(m) for m in range(1, 13)]
+    ),
+    day: str = Query(
+        ..., 
+        description="新DDL日期（可选值：1-31）",
+        enum=[str(d) for d in range(1, 32)]
+    ),
+    hour: str = Query(
+        ..., 
+        description="新DDL小时（可选值：0-23）",
+        enum=[str(h) for h in range(0, 24)]
+    ),
+    minute: str = Query(
+        ..., 
+        description="新DDL分钟（可选值：0-59）",
+        enum=[str(m) for m in range(0, 60)]
+    ),
+    second: str = Query(
+        ..., 
+        description="新DDL秒数（可选值：0-59）",
+        enum=[str(s) for s in range(0, 60)]
+    ),
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="登录用户信息(JSON字符串，包含 sub/username/roles)"),
+):
+    current_user = _parse_current_user(current_user)
+    login_user_id = current_user.get("sub", 0)
+    login_user_roles = current_user.get("roles", [])
+    
+    # 基础校验
+    if login_user_id <= 0:
+        raise HTTPException(status_code=401, detail="请先登录后再操作")
+    if not isinstance(ddlid, int) or ddlid <= 0:
+        raise HTTPException(status_code=400, detail="ddlid必须是正整数")
+    
+    # 时间参数转换与校验
+    try:
+        year_int = int(year)
+        month_int = int(month)
+        day_int = int(day)
+        hour_int = int(hour)
+        minute_int = int(minute)
+        second_int = int(second)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="时间参数格式错误，必须为数字")
+    
+    try:
+        new_ddl_time = datetime(year_int, month_int, day_int, hour_int, minute_int, second_int)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"非法的日期时间组合：{str(e)}")
+    
+    now = datetime.now()
+    if new_ddl_time < now:
+        raise HTTPException(status_code=400, detail="新DDL截止时间不能早于当前时间")
+    
+    # 数据库操作
+    cursor = None
+    try:
+        cursor = db.cursor()
+        # 1. 校验DDL是否存在并获取创建者
+        check_sql = "SELECT teacher_id, teacher_name, created_at FROM ddl_management WHERE ddlid = %s"
+        cursor.execute(check_sql, (ddlid,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"DDL ID {ddlid} 不存在")
+        ddl_teacher_id, ddl_teacher_name, created_at = row
+        
+        # 2. 权限校验
+        is_admin = "admin" in login_user_roles or "管理员" in login_user_roles
+        is_owner = ddl_teacher_id == login_user_id
+        
+        if not is_owner and not is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail=f"无权限更新：仅创建该DDL的教师（ID={ddl_teacher_id}）或管理员可更新，当前登录用户ID={login_user_id}"
+            )
+        
+        # 3. 更新DDL时间
+        update_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        update_sql = """
+        UPDATE ddl_management 
+        SET ddl_time = %s, updated_at = %s 
+        WHERE ddlid = %s
+        """
+        cursor.execute(update_sql, (new_ddl_time, update_time, ddlid))
+        
+        # 4. 查询更新后的完整信息
+        query_sql = "SELECT ddlid, teacher_id, teacher_name, ddl_time, created_at, updated_at FROM ddl_management WHERE ddlid = %s"
+        cursor.execute(query_sql, (ddlid,))
+        updated_row = cursor.fetchone()
+        
+        db.commit()
+        
+        # 5. 构造返回结果
+        return DDLOut(
+            ddlid=updated_row[0],
+            teacher_id=updated_row[1],
+            teacher_name=updated_row[2],
+            ddl_time=updated_row[3].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[3], datetime) else updated_row[3],
+            created_at=updated_row[4].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[4], datetime) else updated_row[4],
+            updated_at=updated_row[5].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[5], datetime) else updated_row[5]
+        )
+    except pymysql.MySQLError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新DDL失败：{str(e)}")
     finally:
         if cursor:
             cursor.close()

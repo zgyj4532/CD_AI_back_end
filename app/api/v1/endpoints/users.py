@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, 
 import csv
 import io
 import pymysql
-from typing import List, Optional 
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
 from app.schemas.user import (
@@ -274,7 +274,6 @@ class DepartmentIdQueryRequest(BaseModel):
 
 router = APIRouter()
 
-# ===== 核心修复：生成业务唯一ID的工具函数 =====
 def _get_next_business_id(
     cursor: pymysql.cursors.DictCursor, 
     table: str, 
@@ -292,7 +291,6 @@ def _get_next_business_id(
     max_id = result.get("max_id") or 0
     return max_id + 1
 
-# ===== 接口实现 =====
 @router.post(
     "/schools",
     summary="录入学校（管理员）",
@@ -309,26 +307,21 @@ def create_school(
     user_roles = current_user_info.get("roles", [])
     if "admin" not in user_roles and "管理员" not in user_roles:
         raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
-    
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         school_name = payload.school_name.strip()
         province = payload.province.strip() if payload.province else None
         city = payload.city.strip() if payload.city else None
-        
-        # 检查学校名称是否已存在（防止重复录入）
+        # 检查学校名称是否已存在
         cursor.execute(
             "SELECT school_id FROM schools WHERE school_name = %s",
             (school_name,)
         )
         if cursor.fetchone():
             raise HTTPException(status_code=400, detail=f"学校「{school_name}」已存在")
-        
-        # 核心修复1：生成唯一的school_id（业务标识）
+        # 生成唯一的school_id
         new_school_id = _get_next_business_id(cursor, "schools", "school_id")
-        
-        # 核心修复2：显式赋值school_id，而非依赖默认值0
         cursor.execute(
             """
             INSERT INTO schools (school_id, school_name, province, city)
@@ -337,12 +330,11 @@ def create_school(
             (new_school_id, school_name, province, city)
         )
         db.commit()
-        
         return {
             "code": 200,
             "message": "学校录入成功",
             "data": {
-                "school_id": new_school_id,  # 返回业务标识，而非主键id
+                "school_id": new_school_id,
                 "school_name": school_name,
                 "province": province,
                 "city": city
@@ -380,12 +372,10 @@ def create_department(
         cursor = db.cursor(pymysql.cursors.DictCursor)
         school_id = payload.school_id
         department_name = payload.department_name.strip()
-        
-        # 检查学校是否存在（关联schools表的业务标识school_id）
+        # 检查学校是否存在
         cursor.execute("SELECT school_id FROM schools WHERE school_id = %s", (school_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail=f"学校ID {school_id} 不存在")
-        
         # 检查该学校下院系名称是否已存在
         cursor.execute(
             "SELECT department_id FROM departments WHERE school_id = %s AND department_name = %s",
@@ -393,11 +383,8 @@ def create_department(
         )
         if cursor.fetchone():
             raise HTTPException(status_code=400, detail=f"学校ID {school_id} 下已存在院系「{department_name}」")
-        
-        # 核心修复1：生成唯一的department_id（业务标识）
+        # 生成唯一的department_id
         new_department_id = _get_next_business_id(cursor, "departments", "department_id")
-        
-        # 核心修复2：显式赋值department_id，而非依赖默认值0
         cursor.execute(
             """
             INSERT INTO departments (department_id, school_id, department_name)
@@ -406,12 +393,11 @@ def create_department(
             (new_department_id, school_id, department_name)
         )
         db.commit()
-        
         return {
             "code": 200,
             "message": "院系录入成功",
             "data": {
-                "department_id": new_department_id,  # 返回业务标识，而非主键id
+                "department_id": new_department_id,
                 "school_id": school_id,
                 "department_name": department_name
             }
@@ -443,15 +429,13 @@ def query_school_id(
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         school_name = payload.school_name.strip()
-        
         cursor.execute(
             "SELECT id as school_id, school_name FROM schools WHERE school_name = %s",
             (school_name,)
         )
         result = cursor.fetchone()
         if not result:
-            raise HTTPException(status_code=404, detail=f"未查询到学校「{school_name}」的ID")
-        
+            raise HTTPException(status_code=404, detail=f"未查询到学校「{school_name}」的ID") 
         return {
             "code": 200,
             "message": "查询成功",
@@ -479,12 +463,10 @@ def query_departments_by_school(
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         school_id = payload.school_id
-        
         # 先检查学校是否存在
         cursor.execute("SELECT id FROM schools WHERE id = %s", (school_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail=f"学校ID {school_id} 不存在")
-        
         # 查询该学校下所有院系
         cursor.execute(
             """
@@ -501,7 +483,6 @@ def query_departments_by_school(
                 "message": f"学校ID {school_id} 下暂无院系信息",
                 "data": []
             }
-        
         return {
             "code": 200,
             "message": "查询成功",
@@ -676,17 +657,13 @@ def change_password(
     user_id = current_user.get("sub")
     if not user_id or user_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录")
-    
     cursor = None
     try:
         # 解析用户类型
         user_type = _resolve_user_type_from_payload(current_user)
         info = USER_TABLES[user_type]
         table = info["table"]
-        id_col = info["id_col"]
-        
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        
         # 查询用户信息并验证原始密码
         cursor.execute(
             f"SELECT id, password FROM {table} WHERE id = %s",
@@ -695,15 +672,12 @@ def change_password(
         user_row = cursor.fetchone()
         if not user_row:
             raise HTTPException(status_code=404, detail="用户不存在")
-        
         # 验证原始密码
         if not verify_password(payload.old_password, user_row["password"]):
             raise HTTPException(status_code=400, detail="原始密码错误")
-        
         # 验证新密码
         if len(payload.new_password) < 6:
             raise HTTPException(status_code=400, detail="新密码长度不能少于6位")
-        
         # 加密新密码并更新
         new_password_hash = get_password_hash(payload.new_password)
         cursor.execute(
@@ -711,9 +685,7 @@ def change_password(
             (new_password_hash, user_id)
         )
         db.commit()
-        
         return {"message": "密码修改成功"}
-    
     except HTTPException:
         raise
     except pymysql.MySQLError as e:
@@ -756,31 +728,25 @@ def reset_user_password(
     user_roles = current_user_info.get("roles", [])
     if "admin" not in user_roles and "管理员" not in user_roles:
         raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
-    
     cursor = None
     try:
         # 标准化用户类型
         user_type = _normalize_user_type(payload.user_type)
         info = USER_TABLES[user_type]
         table = info["table"]
-        
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        
         # 检查用户是否存在
         cursor.execute(f"SELECT id FROM {table} WHERE id = %s", (payload.user_id,))
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
-        
-        # 重置密码为123456（加密存储）
+        # 重置密码为123456
         default_password = "123456"
         password_hash = get_password_hash(default_password)
-        
         cursor.execute(
             f"UPDATE {table} SET password = %s, updated_at = NOW() WHERE id = %s",
             (password_hash, payload.user_id)
         )
         db.commit()
-        
         return {
             "message": f"{user_type}用户密码已重置为123456",
             "user_id": payload.user_id,
@@ -806,9 +772,9 @@ class UserInfoRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "sub": 10086,
-                "username": "张老师",
-                "roles": "admin"
+                "sub": 1,
+                "username": "2400305304",
+                "roles": "student"
             }
         }
     }
@@ -831,18 +797,21 @@ def get_user_full_info(
             "roles": payload.roles
         }
         user_type = _resolve_user_type_from_payload(user_payload)
-        info = USER_TABLES[user_type]
-        table = info["table"]
-        id_col = info["id_col"]
-        
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        
-        # 根据用户类型构建查询SQL（排除password字段）
+        # 根据用户类型构建查询SQL
         if user_type == "student":
             cursor.execute("""
                 SELECT 
-                    id, student_id, name, phone, email, grade, class_name,
-                    school_id, school_name, department_id, department_name,
+                    id, 
+                    student_id, 
+                    name, 
+                    phone, 
+                    email, 
+                    school_id, 
+                    school_name, 
+                    department_id, 
+                    department_name, 
+                    group_id,
                     DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                     DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
                 FROM students 
@@ -851,8 +820,16 @@ def get_user_full_info(
         elif user_type == "teacher":
             cursor.execute("""
                 SELECT 
-                    id, teacher_id, name, phone, email, department, title,
-                    school_id, school_name, department_id, department_name,
+                    id, 
+                    teacher_id, 
+                    name, 
+                    phone, 
+                    email, 
+                    school_id, 
+                    school_name, 
+                    department_id, 
+                    department_name, 
+                    group_id,
                     DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                     DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
                 FROM teachers 
@@ -861,34 +838,41 @@ def get_user_full_info(
         elif user_type == "admin":
             cursor.execute("""
                 SELECT 
-                    id, admin_id, name, phone, email, role,
-                    school_id, school_name, department_id, department_name,
+                    id, 
+                    admin_id, 
+                    name, 
+                    phone, 
+                    email, 
+                    role,
+                    school_id, 
+                    school_name, 
+                    department_id, 
+                    department_name,
                     DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                     DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
                 FROM admins 
                 WHERE id = %s
             """, (payload.sub,))
         else:
-            raise HTTPException(status_code=400, detail="不支持的用户类型")
-        
+            raise HTTPException(status_code=400, detail=f"不支持的用户类型: {user_type}")
         user_info = cursor.fetchone()
         if not user_info:
-            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
-        
+            raise HTTPException(status_code=404, detail=f"{user_type}用户（ID: {payload.sub}）不存在")
         # 补充用户类型信息
         user_info["user_type"] = user_type
-        
         return {
             "code": 200,
             "message": "获取用户完整信息成功",
             "data": user_info
         }
-    
     except HTTPException:
         raise
     except pymysql.MySQLError as e:
-        logger.error(f"获取用户完整信息数据库错误: {str(e)}")
-        raise HTTPException(status_code=500, detail="获取用户信息失败")
+        logger.error(f"获取用户完整信息数据库错误（用户ID: {payload.sub}）: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取用户信息失败：数据库操作异常")
+    except Exception as e:
+        logger.error(f"获取用户完整信息未知错误（用户ID: {payload.sub}）: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取用户信息失败：系统异常")
     finally:
         if cursor:
             cursor.close()
@@ -903,13 +887,17 @@ def get_user_full_info(
 def create_student(payload: StudentCreate, db: pymysql.connections.Connection = Depends(get_db)):
     cursor = None
     try:
+        # 初始化字典游标
         cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 校验用户名非空
         username = payload.username.strip()
         if not username:
             raise HTTPException(status_code=400, detail="username 不能为空")
+        # 处理默认值
         full_name = payload.full_name or username
         raw_password = payload.password or "123456"
         password_hash = get_password_hash(raw_password)
+        # 插入学生信息到数据库
         cursor.execute(
             """
             INSERT INTO students (student_id, name, phone, email, password)
@@ -918,6 +906,7 @@ def create_student(payload: StudentCreate, db: pymysql.connections.Connection = 
             (username, full_name, payload.phone, payload.email, password_hash),
         )
         db.commit()
+        # 查询刚创建的学生信息
         user_id = cursor.lastrowid
         cursor.execute(
             """
@@ -929,17 +918,22 @@ def create_student(payload: StudentCreate, db: pymysql.connections.Connection = 
             (user_id,),
         )
         row = cursor.fetchone()
+        # 校验查询结果
         if not row:
             raise HTTPException(status_code=500, detail="用户创建成功但查询失败")
+        # 添加角色标识并返回
         row["role"] = "student" if isinstance(row, dict) else "student"
         return UserOut(**row)
+    # 用户名重复异常处理
     except pymysql.err.IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="用户名已存在")
+    # 数据库通用异常处理
     except pymysql.MySQLError as e:
         db.rollback()
         logger.error(f"用户创建数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="用户创建失败")
+    # 释放游标资源
     finally:
         if cursor:
             cursor.close()
@@ -954,15 +948,17 @@ def create_student(payload: StudentCreate, db: pymysql.connections.Connection = 
 def create_teacher(payload: TeacherCreate, db: pymysql.connections.Connection = Depends(get_db)):
     cursor = None
     try:
+        # 初始化字典游标
         cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 校验教师工号非空
         username = payload.username.strip()
         if not username:
             raise HTTPException(status_code=400, detail="username 不能为空")
-
+        # 处理默认值
         full_name = payload.full_name or username
         raw_password = payload.password or "123456"
         password_hash = get_password_hash(raw_password)
-
+        # 插入教师信息到数据库
         cursor.execute(
             """
             INSERT INTO teachers (teacher_id, name, phone, email, password)
@@ -971,6 +967,7 @@ def create_teacher(payload: TeacherCreate, db: pymysql.connections.Connection = 
             (username, full_name, payload.phone, payload.email, password_hash),
         )
         db.commit()
+        # 查询刚创建的教师信息
         user_id = cursor.lastrowid
         cursor.execute(
             """
@@ -982,17 +979,22 @@ def create_teacher(payload: TeacherCreate, db: pymysql.connections.Connection = 
             (user_id,),
         )
         row = cursor.fetchone()
+        # 校验查询结果
         if not row:
             raise HTTPException(status_code=500, detail="用户创建成功但查询失败")
+        # 添加角色标识并返回
         row["role"] = "teacher" if isinstance(row, dict) else "teacher"
         return UserOut(**row)
+    # 教师工号重复异常处理
     except pymysql.err.IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="用户名已存在")
+    # 数据库通用异常处理
     except pymysql.MySQLError as e:
         db.rollback()
         logger.error(f"用户创建数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="用户创建失败")
+    # 释放游标资源
     finally:
         if cursor:
             cursor.close()
@@ -1007,15 +1009,17 @@ def create_teacher(payload: TeacherCreate, db: pymysql.connections.Connection = 
 def create_admin(payload: AdminCreate, db: pymysql.connections.Connection = Depends(get_db)):
     cursor = None
     try:
+        # 初始化字典游标
         cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 校验管理员账号非空
         username = payload.username.strip()
         if not username:
             raise HTTPException(status_code=400, detail="username 不能为空")
-
+        # 处理默认值
         full_name = payload.full_name or username
         raw_password = payload.password or "123456"
         password_hash = get_password_hash(raw_password)
-
+        # 插入管理员信息到数据库
         cursor.execute(
             """
             INSERT INTO admins (admin_id, name, phone, email, role, password)
@@ -1031,6 +1035,7 @@ def create_admin(payload: AdminCreate, db: pymysql.connections.Connection = Depe
             ),
         )
         db.commit()
+        # 查询刚创建的管理员信息
         user_id = cursor.lastrowid
         cursor.execute(
             """
@@ -1042,16 +1047,21 @@ def create_admin(payload: AdminCreate, db: pymysql.connections.Connection = Depe
             (user_id,),
         )
         row = cursor.fetchone()
+        # 校验查询结果
         if not row:
             raise HTTPException(status_code=500, detail="用户创建成功但查询失败")
+        # 返回管理员信息
         return UserOut(**row)
+    # 管理员账号重复异常处理
     except pymysql.err.IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="用户名已存在")
+    # 数据库通用异常处理
     except pymysql.MySQLError as e:
         db.rollback()
         logger.error(f"用户创建数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="用户创建失败")
+    # 释放游标资源
     finally:
         if cursor:
             cursor.close()
@@ -1811,3 +1821,155 @@ def teacher_update_review(
     finally:
         if cursor:
             cursor.close()
+
+
+USER_TABLES_MAP: Dict[str, Dict[str, str]] = {
+    "student": {
+        "table": "students",
+        "username_col": "student_id",
+        "sub_col": "id"
+    },
+    "teacher": {
+        "table": "teachers",
+        "username_col": "teacher_id",
+        "sub_col": "id"
+    },
+    "admin": {
+        "table": "admins",
+        "username_col": "admin_id",
+        "sub_col": "id"
+    }
+}
+
+class UsernameToSubRequest(BaseModel):
+    """通过username查询sub的请求模型"""
+    username: str = Field(..., min_length=1, description="用户名（学号/教师工号/管理员账号）")
+    user_type: str = Field(..., pattern="^(student|teacher|admin)$", 
+                           description="用户类型，只能是 student/teacher/admin")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "username": "2400305304",
+                "user_type": "student"
+            }
+        }
+    }
+
+
+def get_sub_by_username(
+    db: pymysql.connections.Connection,
+    username: str,
+    user_type: str
+) -> Optional[int]:
+    # 验证用户类型
+    if user_type not in USER_TABLES_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"用户类型错误，仅支持 {list(USER_TABLES_MAP.keys())}"
+        )
+    
+    # 获取表信息
+    table_info = USER_TABLES_MAP[user_type]
+    table_name = table_info["table"]
+    username_col = table_info["username_col"]
+    sub_col = table_info["sub_col"]
+    
+    cursor = None
+    try:
+        # 使用字典游标
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        
+        # 执行查询
+        query_sql = f"""
+            SELECT {sub_col} FROM {table_name} 
+            WHERE {username_col} = %s LIMIT 1
+        """
+        cursor.execute(query_sql, (username.strip(),))
+        result = cursor.fetchone()
+        
+        if result:
+            return int(result[sub_col])  # 返回sub（id）
+        return None
+    
+    except pymysql.MySQLError as e:
+        logger.error(f"查询sub失败：表={table_name}, username={username}, 错误={str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="数据库查询失败，请稍后重试"
+        )
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.post("/get-sub-by-username", summary="通过username查询sub",
+             description="根据用户名（学号/工号）和用户类型查询对应的自增主键ID（sub）")
+def api_get_sub_by_username(
+    request: UsernameToSubRequest,
+    db: pymysql.connections.Connection = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    API接口：通过username查询sub
+    
+    Returns:
+        {
+            "code": 200,
+            "message": "查询成功",
+            "data": {
+                "username": "2400305304",
+                "user_type": "student",
+                "sub": 123
+            }
+        }
+    """
+    # 调用核心查询函数
+    sub = get_sub_by_username(db, request.username, request.user_type)
+    
+    if sub is None:
+        return {
+            "code": 404,
+            "message": f"{request.user_type}类型用户 {request.username} 不存在",
+            "data": None
+        }
+    
+    return {
+        "code": 200,
+        "message": "查询成功",
+        "data": {
+            "username": request.username,
+            "user_type": request.user_type,
+            "sub": sub
+        }
+    }
+
+
+@router.get("/get-sub-auto", summary="自动匹配用户类型查询sub",
+            description="无需指定用户类型，自动查询学生/教师/管理员表获取sub")
+def api_get_sub_auto(
+    username: str = Query(..., min_length=1, description="用户名（学号/教师工号/管理员账号）"),
+    db: pymysql.connections.Connection = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    扩展接口：自动匹配用户类型查询sub（无需指定user_type）
+    """
+    # 依次查询学生、教师、管理员表
+    for user_type in ["student", "teacher", "admin"]:
+        sub = get_sub_by_username(db, username, user_type)
+        if sub is not None:
+            return {
+                "code": 200,
+                "message": "查询成功",
+                "data": {
+                    "username": username,
+                    "user_type": user_type,
+                    "sub": sub
+                }
+            }
+    
+    # 未找到
+    return {
+        "code": 404,
+        "message": f"未找到用户名 {username} 对应的用户",
+        "data": None
+    }
