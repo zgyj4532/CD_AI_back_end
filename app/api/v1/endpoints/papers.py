@@ -5,6 +5,10 @@ from fastapi.responses import StreamingResponse
 from typing import List, Optional
 import os
 import io
+import sys
+import shutil
+import subprocess
+import tempfile
 from app.core.dependencies import get_current_user
 from app.schemas.document import (
     PaperCreate,
@@ -23,10 +27,9 @@ import pymysql
 import json
 
 try:
-    from docx2pdf import convert
-    import tempfile
+    from docx2pdf import convert as docx2pdf_convert
 except ImportError:
-    raise ImportError("请安装依赖：pip install docx2pdf pywin32 (Windows) 或 libreoffice (Linux/Mac)")
+    docx2pdf_convert = None
 
 router = APIRouter()
 
@@ -75,26 +78,71 @@ def _parse_version(version_str: str) -> tuple:
             detail="版本号格式错误，必须符合 v+数字.数字 格式（如 v1.0、v2.1）"
         )
 
+
+def _find_soffice_binary() -> Optional[str]:
+    for cmd in ("soffice", "libreoffice"):
+        path = shutil.which(cmd)
+        if path:
+            return path
+    return None
+
 def convert_docx_to_pdf(docx_content: bytes, filename: str) -> tuple:
+    pdf_filename = os.path.splitext(filename)[0] + '.pdf'
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as temp_docx:
-            temp_docx.write(docx_content)
-            temp_docx_path = temp_docx.name
-        pdf_filename = os.path.splitext(filename)[0] + '.pdf'
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
-            temp_pdf_path = temp_pdf.name
-        convert(temp_docx_path, temp_pdf_path)
-        with open(temp_pdf_path, 'rb') as f:
-            pdf_content = f.read()
-        os.unlink(temp_docx_path)
-        os.unlink(temp_pdf_path)
-        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = os.path.join(tmpdir, os.path.basename(filename) or "input.docx")
+            with open(docx_path, "wb") as temp_docx:
+                temp_docx.write(docx_content)
+
+            if sys.platform.startswith("linux"):
+                soffice_bin = _find_soffice_binary()
+                if not soffice_bin:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="DOCX转PDF失败：未找到LibreOffice（soffice/libreoffice）。请在Linux上安装LibreOffice后重试"
+                    )
+                cmd = [
+                    soffice_bin,
+                    "--headless",
+                    "--nologo",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    tmpdir,
+                    docx_path,
+                ]
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if proc.returncode != 0:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"DOCX转PDF失败：LibreOffice 执行错误（code={proc.returncode}，stderr={proc.stderr.decode(errors='ignore').strip()[:400]} )"
+                    )
+                pdf_path = os.path.join(tmpdir, pdf_filename)
+            else:
+                if not docx2pdf_convert:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="DOCX转PDF失败：docx2pdf 未安装或不可用，请安装 docx2pdf 并确保本机有可用的 Word/LibreOffice"
+                    )
+                docx2pdf_convert(docx_path, tmpdir)
+                pdf_path = os.path.join(tmpdir, pdf_filename)
+
+            if not os.path.exists(pdf_path):
+                raise HTTPException(
+                    status_code=500,
+                    detail="DOCX转PDF失败：未生成PDF文件，请检查转换工具安装情况"
+                )
+
+            with open(pdf_path, 'rb') as f:
+                pdf_content = f.read()
+
         return pdf_content, pdf_filename
-    
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"DOCX转PDF失败：{str(e)}。请确保已安装docx2pdf依赖和对应的转换引擎（Windows: Microsoft Word, Linux/Mac: LibreOffice）"
+            detail=f"DOCX转PDF失败：{str(e)}。请确保已安装转换工具（Linux推荐安装LibreOffice）"
         )
 
 
