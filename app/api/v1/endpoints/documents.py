@@ -4,11 +4,35 @@ import pymysql
 from app.database import get_db
 from app.schemas.document import MaterialResponse
 from app.services.oss import upload_attachment_to_storage
-import os
 import json
 from datetime import datetime
+from typing import Optional
 
 router = APIRouter()
+
+def _parse_current_user(current_user: Optional[str]) -> dict:
+    try:
+        if not current_user:
+            return {"sub": 0, "username": "", "roles": []}
+        import urllib.parse
+        raw = urllib.parse.unquote(current_user)
+        if not raw.strip():
+            return {"sub": 0, "username": "", "roles": []}
+        if raw.isdigit():
+            return {"sub": int(raw), "username": f"user{raw}", "roles": ["student"]}
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            sub_value = data.get("sub", 0)
+            if isinstance(sub_value, str) and sub_value.isdigit():
+                data["sub"] = int(sub_value)
+            elif isinstance(sub_value, int):
+                data["sub"] = sub_value
+            else:
+                data["sub"] = 0
+            return data
+    except Exception:
+        pass
+    return {"sub": 0, "username": "", "roles": []}
 
 
 @router.post(
@@ -19,8 +43,7 @@ router = APIRouter()
 )
 async def upload_material(
     file: UploadFile = File(...),  
-    name: str = Query(..., description="作者/上传者姓名（必填）"),
-    submitter_id: int = Query(..., description="提交人ID，用于将文件与用户/论文绑定（必填）"),
+    name: str = Query(..., description="username"),
     file_type: str = Query(
         "document", 
         description="文件类型，可选值：document(文档)、essay(文章)",
@@ -28,13 +51,25 @@ async def upload_material(
     ),
     version: int = Query(1, description="版本号，默认1，最小值1", ge=1),
     remark: str = Query(None, description="备注信息"),
-    db: pymysql.connections.Connection = Depends(get_db)
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="提交者信息(JSON字符串，包含 sub/username/roles)"),
 ):
+    # 解析当前用户信息
+    current_user = _parse_current_user(current_user)
+    login_username = current_user.get("username", "")
     # 基础参数校验
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名不能为空")
     if not name:
         raise HTTPException(status_code=400, detail="作者/上传者姓名不能为空")
+    # 校验登录用户名与传入的name一致
+    if not login_username:
+        raise HTTPException(status_code=401, detail="未获取到有效登录用户信息，请先登录")
+    if login_username != name:
+        raise HTTPException(
+            status_code=403, 
+            detail=f"无权限上传：登录用户名[{login_username}]与传入的username[{name}]不一致"
+        )
     # 读取文件内容
     try:
         content = await file.read()
@@ -56,18 +91,15 @@ async def upload_material(
             VALUES (%s, %s, NOW(), %s, %s, %s, %s, NOW(), NOW())
         """
         storage_path = upload_attachment_to_storage(file.filename, content)
-        # 将提交人ID与备注一起保存到 remark 字段，使用 JSON 格式，便于后续解析绑定
-        remark_value = json.dumps({"submitter_id": submitter_id, "remark": remark})
         # 执行插入
         cursor.execute(
             insert_sql,
             (
-                name,            # 作者/上传者姓名
-                file.filename,   # 文件名
-                storage_path,    # 存储路径（标识值）
-                file_type,       # 文件类型
-                version,         # 版本号
-                remark_value     # 备注（包含 submitter_id 的 JSON）
+                name,
+                file.filename,
+                storage_path,
+                file_type,
+                version,          
             )
         )
         # 获取新增记录ID
@@ -86,7 +118,7 @@ async def upload_material(
         new_record = cursor.fetchone()
         if not new_record:
             raise HTTPException(status_code=500, detail="文件上传成功，但查询不到新增记录")
-        # 将上传文件的 content_type 加入返回记录（不修改数据库）
+        # 将上传文件的 content_type 加入返回记录
         try:
             new_record["content_type"] = file.content_type
         except Exception:
@@ -112,15 +144,30 @@ async def upload_material(
 async def update_material(
     material_id: int,
     file: UploadFile = File(...),
-    name: str = Query(None, description="作者/上传者姓名"),
+    name: str = Query(..., description="username"),
     file_type: str = Query(None, description="文件类型：document(文档)或essay(文章)", enum=["document", "essay"]),
     version: int = Query(None, description="版本号", ge=1),
     remark: str = Query(None, description="备注"),
-    db: pymysql.connections.Connection = Depends(get_db)
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="提交者信息(JSON字符串，包含 sub/username/roles)"),
 ):
+    # 解析当前用户信息
+    current_user = _parse_current_user(current_user)
+    login_username = current_user.get("username", "")
     # 基础文件参数校验
     if not file.filename:
         raise HTTPException(status_code=400, detail="上传的文件必须包含文件名")
+    if not name:
+        raise HTTPException(status_code=400, detail="作者/上传者姓名不能为空")
+    # 校验登录用户信息
+    if not login_username:
+        raise HTTPException(status_code=401, detail="未获取到有效登录用户信息，请先登录")
+    # 校验传入的name与登录用户名一致
+    if login_username != name:
+        raise HTTPException(
+            status_code=403, 
+            detail=f"无权限更新：登录用户名[{login_username}]与传入的username[{name}]不一致"
+        )
     # 读取文件内容
     try:
         content = await file.read()
@@ -128,14 +175,23 @@ async def update_material(
             raise HTTPException(status_code=400, detail="上传的文件内容不能为空")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"读取上传文件失败：{str(e)}")
+    
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        # 检查指定ID的材料是否存在
-        cursor.execute("SELECT id FROM file_records WHERE id = %s", (material_id,))
-        if not cursor.fetchone():
+        # 检查指定ID的材料是否存在，并获取原有name
+        cursor.execute("SELECT id, name FROM file_records WHERE id = %s", (material_id,))
+        existing_record = cursor.fetchone()
+        if not existing_record:
             raise HTTPException(status_code=404, detail=f"ID为{material_id}的材料不存在")
-        # 4. 构建动态更新SQL
+        # 校验传入的name必须与原记录name一致
+        original_name = existing_record["name"]
+        if name != original_name:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"传入的作者姓名与原记录不一致，原姓名：{original_name}，传入姓名：{name}"
+            )
+        # 构建动态更新SQL
         update_fields = []
         update_params = []
         # 必更新字段：文件名、上传时间、storage_path
@@ -145,18 +201,15 @@ async def update_material(
         update_fields.append("storage_path = %s")
         update_params.append(upload_attachment_to_storage(file.filename, content))
         # 可选更新字段
-        if name is not None:
-            update_fields.append("name = %s")
-            update_params.append(name)
+        update_fields.append("name = %s")
+        update_params.append(name)
+        
         if file_type is not None:
             update_fields.append("file_type = %s")
             update_params.append(file_type)
         if version is not None:
             update_fields.append("version = %s")
             update_params.append(version)
-        if remark is not None:
-            update_fields.append("remark = %s")
-            update_params.append(remark)
         # 最后更新updated_at字段
         update_fields.append("updated_at = NOW()")
         # 拼接更新SQL
@@ -183,7 +236,7 @@ async def update_material(
         row = cursor.fetchone()
         if row is None:
             raise HTTPException(status_code=500, detail="更新成功但查询不到记录")
-        # 将上传文件的 content_type 加入返回数据（不修改数据库）
+        # 将上传文件的 content_type 加入返回数据
         try:
             row["content_type"] = file.content_type
         except Exception:
@@ -204,27 +257,52 @@ async def update_material(
 )
 def delete_material(
     material_id: int,
-    db: pymysql.connections.Connection = Depends(get_db)
+    name: str = Query(..., description="username"),
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="提交者信息(JSON字符串，包含 sub/username/roles)"),
 ):
+    # 解析当前用户信息
+    current_user = _parse_current_user(current_user)
+    login_username = current_user.get("username", "")
+    # 基础参数校验
+    if not name:
+        raise HTTPException(status_code=400, detail="作者/上传者姓名不能为空")
+    # 登录状态和用户名校验
+    if not login_username:
+        raise HTTPException(status_code=401, detail="未获取到有效登录用户信息，请先登录")
+    if login_username != name:
+        raise HTTPException(
+            status_code=403, 
+            detail=f"无权限删除：登录用户名[{login_username}]与传入的username[{name}]不一致"
+        )
     cursor = None
     try:
         # 创建游标
-        cursor = db.cursor()
-        # 检查指定ID的材料是否存在
-        check_sql = "SELECT id FROM file_records WHERE id = %s"
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 检查指定ID的材料是否存在，并获取原记录的name
+        check_sql = "SELECT id, name FROM file_records WHERE id = %s"
         cursor.execute(check_sql, (material_id,))
-        if not cursor.fetchone():
+        existing_record = cursor.fetchone()
+        if not existing_record:
             raise HTTPException(status_code=404, detail=f"ID为{material_id}的材料不存在")
+        # 校验传入的name与原记录的name一致
+        original_name = existing_record["name"]
+        if name != original_name:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"传入的作者姓名与原记录不一致，原姓名：{original_name}，传入姓名：{name}"
+            )
         # 执行删除操作
         delete_sql = "DELETE FROM file_records WHERE id = %s"
         cursor.execute(delete_sql, (material_id,))
-        # 3. 提交事务
+        # 提交事务
         db.commit()
         # 返回友好的删除成功响应
         return {
             "code": 200,
             "message": "删除成功",
             "material_id": material_id,
+            "username": login_username,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except pymysql.MySQLError as e:

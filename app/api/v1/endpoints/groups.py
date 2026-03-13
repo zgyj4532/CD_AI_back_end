@@ -1,10 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query, Header, Request, Body
+from fastapi import APIRouter, UploadFile, File,  HTTPException, Query, Header
 from typing import Optional, List
-from pydantic import BaseModel
-from app.core.dependencies import get_current_user
-from app.core.security import decode_access_token, create_access_token 
-from app.models.document import DocumentRecord  
-import io
+from pydantic import BaseModel  
 import json
 import pymysql
 from datetime import datetime  
@@ -26,14 +22,7 @@ class RequestWithCurrentUser(BaseModel):
     current_user: CurrentUser
 
 
-class GroupCreate(BaseModel):
-    """创建群组请求体"""
 
-    group_id: str | None = None
-    group_name: str
-    teacher_id: str | None = None
-    description: str | None = None
-    current_user: CurrentUser
 
 
 class GroupMember(BaseModel):
@@ -52,19 +41,7 @@ class GroupUpdate(BaseModel):
     description: str | None = None
 
 
-class GroupBind(BaseModel):
-    """绑定群组请求体"""
-    group_id: str
-    group_name: str
-    member_type: str  # 只能是 teacher 或 student
-    member_id: int     # 用户内部 ID
-    role: str = "member"  # 成员角色：member 或 admin
-    current_user: CurrentUser
 
-
-class BindRequest(BaseModel):
-    """绑定群组请求包装器"""
-    payload: GroupBind
 
 
 def _parse_current_user(current_user: Optional[dict|str]) -> dict:
@@ -164,6 +141,8 @@ def list_groups(
     cursor = None
     try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
+        # 确保用户存在且身份正确
+        _ensure_caller_identity(cursor, cu)
         # resolve teacher internal id: allow passing teacher.teacher_id (工号) or internal id
         teacher_internal_id = None
         if teacher_id:
@@ -310,6 +289,15 @@ async def import_groups(
         logger.warning(f"用户{current_user['username']}无导入权限，当前角色: {user_roles}")
         raise HTTPException(status_code=403, detail="无批量导入师生群组权限，请联系管理员")
 
+    # 确保用户存在且身份正确
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        _ensure_caller_identity(cursor, current_user)
+    finally:
+        cursor.close()
+        conn.close()
+
     # 基础文件格式校验
     supported_formats = ('.tsv', '.csv')
     if not file.filename.lower().endswith(supported_formats):
@@ -374,58 +362,55 @@ async def import_groups(
         
         # 数据存储
         imported_count = len(import_data)
-        group_ids = set(item["group_id"] for item in import_data)
 
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            # 插入或更新群组
+            # 处理每条数据
             for item in import_data:
+                # 插入或更新群组
                 cursor.execute("""
                     INSERT INTO `groups` (`group_id`, `group_name`, `teacher_id`, `description`)
                     VALUES (%s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE `group_name`=VALUES(`group_name`), `teacher_id`=VALUES(`teacher_id`), `description`=VALUES(`description`)
                 """, (item["group_id"], item["group_name"], item["teacher_id"], None))
                 
-                # 插入或更新教师
-                cursor.execute("""
-                    INSERT INTO `teachers` (`teacher_id`, `name`, `password`)
-                    VALUES (%s, %s, %s)
-                    ON DUPLICATE KEY UPDATE `name`=VALUES(`name`)
-                """, (item["teacher_id"], item["teacher_id"], ""))  # 假设name就是teacher_id，如果有更好数据可以改
-                
-                # 插入或更新学生
-                cursor.execute("""
-                    INSERT INTO `students` (`student_id`, `name`, `password`)
-                    VALUES (%s, %s, %s)
-                    ON DUPLICATE KEY UPDATE `name`=VALUES(`name`)
-                """, (item["student_id"], item["student_name"], ""))
-                
-                # 获取学生ID
-                cursor.execute("SELECT `id` FROM `students` WHERE `student_id` = %s", (item["student_id"],))
-                student_row = cursor.fetchone()
-                if student_row:
-                    student_id = student_row[0]
-                    # 插入群组成员
-                    cursor.execute("""
-                        INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`)
-                        VALUES (%s, %s, 'student', 'member')
-                        ON DUPLICATE KEY UPDATE `is_active`=1, `role`=VALUES(`role`)
-                    """, (item["group_id"], student_id))
-                
-                # 获取教师ID并添加为成员
+                # 验证教师是否存在
                 cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (item["teacher_id"],))
                 teacher_row = cursor.fetchone()
-                if teacher_row:
-                    teacher_id = teacher_row[0]
-                    cursor.execute("""
-                        INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`)
-                        VALUES (%s, %s, 'teacher', 'admin')
-                        ON DUPLICATE KEY UPDATE `is_active`=1, `role`=VALUES(`role`)
-                    """, (item["group_id"], teacher_id))
+                if not teacher_row:
+                    raise HTTPException(status_code=404, detail=f"教师工号 {item['teacher_id']} 不存在")
+                teacher_id = teacher_row[0]
+                
+                # 验证学生是否存在并检查姓名是否匹配
+                cursor.execute("SELECT `id`, `name` FROM `students` WHERE `student_id` = %s", (item["student_id"],))
+                student_row = cursor.fetchone()
+                if not student_row:
+                    raise HTTPException(status_code=404, detail=f"学生学号 {item['student_id']} 不存在")
+                student_id = student_row[0]
+                student_name = student_row[1]
+                if student_name != item["student_name"]:
+                    raise HTTPException(status_code=400, detail=f"学生学号 {item['student_id']} 与姓名 {item['student_name']} 不匹配，数据库中姓名为 {student_name}")
+                
+                # 添加学生到群组
+                cursor.execute("""
+                    INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`)
+                    VALUES (%s, %s, 'student')
+                    ON DUPLICATE KEY UPDATE `is_active`=1
+                """, (item["group_id"], student_id))
+                
+                # 添加教师到群组
+                cursor.execute("""
+                    INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`)
+                    VALUES (%s, %s, 'teacher')
+                    ON DUPLICATE KEY UPDATE `is_active`=1
+                """, (item["group_id"], teacher_id))
             
             conn.commit()
             logger.info(f"成功导入{imported_count}条师生关系数据")
+        except HTTPException:
+            conn.rollback()
+            raise
         except Exception as e:
             conn.rollback()
             logger.error(f"数据库操作失败: {str(e)}")
@@ -463,24 +448,24 @@ async def import_groups(
     )
 )
 async def create_group(
-    payload: GroupCreate
+    group_name: str,
+    group_id: str | None = None,
+    teacher_id: str | None = None,
+    description: str | None = None,
+    current_user: Optional[str] = Query(None, description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
 ):
-    cu = _parse_current_user(payload.current_user.model_dump())
-    group_name = payload.group_name
-    group_id = payload.group_id
-    teacher_id = payload.teacher_id
-    description = payload.description
+    cu = _parse_current_user(current_user)
     # Only teachers or admins can create groups
     allowed = {"admin", "teacher"}
 
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        # normalize and verify caller roles and existence in DB
+        # normalize and verify caller roles
         roles_norm = _normalize_roles(cu.get("roles", []))
         if not allowed & roles_norm:
             raise HTTPException(status_code=403, detail="仅老师或管理员可创建群组")
-        # ensure caller exists in the corresponding table
+        # 确保用户存在且身份正确
         _ensure_caller_identity(cursor, cu)
 
         group_id_value = (group_id or "").strip() or None
@@ -512,8 +497,8 @@ async def create_group(
         creator_member_type = "admin" if "admin" in roles_norm else ("teacher" if "teacher" in roles_norm else "student")
         try:
             cursor.execute(
-                "INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`) VALUES (%s, %s, %s, %s, 1, NOW()) ON DUPLICATE KEY UPDATE role=VALUES(role), is_active=1",
-                (group_id_value, cu.get("sub", 0), creator_member_type, "owner"),
+                "INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `is_active`, `joined_at`) VALUES (%s, %s, %s, 1, NOW()) ON DUPLICATE KEY UPDATE is_active=1",
+                (group_id_value, cu.get("sub", 0), creator_member_type),
             )
         except Exception:
             # if owner insert fails, rollback group creation as atomic
@@ -547,24 +532,19 @@ async def create_group(
     description="将用户绑定到指定群组"
 )
 async def bind_group(
-    payload: GroupBind
+    group_id: str,
+    group_name: str,
+    member_type: str,  # 只能是 teacher 或 student
+    member_id: int,     # 用户内部 ID
+    current_user: Optional[str] = Query(None, description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
 ):
     """绑定用户到群组的实现"""
-    cu = _parse_current_user(payload.current_user.model_dump())
-    group_id = payload.group_id
-    group_name = payload.group_name
-    member_type = payload.member_type
-    member_id = payload.member_id
-    role = payload.role
+    cu = _parse_current_user(current_user)
     
     try:
         # 验证入群身份
         if member_type not in ["teacher", "student"]:
             raise HTTPException(status_code=400, detail="入群身份只能是教师或学生")
-        
-        # 验证角色
-        if role not in ["member", "admin"]:
-            raise HTTPException(status_code=400, detail="角色必须是 member 或 admin")
     except HTTPException:
         raise
     except Exception as e:
@@ -574,6 +554,8 @@ async def bind_group(
     cursor = None
     try:
         cursor = conn.cursor()
+        # 确保当前用户存在且身份正确
+        _ensure_caller_identity(cursor, cu)
         
         # 验证群组是否存在
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
@@ -592,10 +574,10 @@ async def bind_group(
         
         # 绑定用户到群组
         cursor.execute("""
-            INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`)
-            VALUES (%s, %s, %s, %s, 1, NOW())
-            ON DUPLICATE KEY UPDATE `is_active` = 1, `role` = VALUES(`role`), `updated_at` = NOW()
-        """, (group_id, member_id, member_type, role))
+            INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `is_active`, `joined_at`)
+            VALUES (%s, %s, %s, 1, NOW())
+            ON DUPLICATE KEY UPDATE `is_active` = 1, `updated_at` = NOW()
+        """, (group_id, member_id, member_type))
         
         conn.commit()
         return {
@@ -603,7 +585,6 @@ async def bind_group(
             "group_name": group_name,
             "member_id": member_id,
             "member_type": member_type,
-            "role": role,
             "message": "绑定成功"
         }
     except HTTPException:
@@ -617,23 +598,23 @@ async def bind_group(
         conn.close()
 
 
-class DeleteGroupRequest(BaseModel):
-    """删除群组请求体"""
-    current_user: CurrentUser
-
-
 @router.delete(
     "/{group_id}",
     summary="删除群组",
     description="根据群组编号删除群组及其所有成员关系"
 )
-async def delete_group(group_id: str, payload: DeleteGroupRequest):
-    cu = _parse_current_user(payload.current_user.model_dump())
+async def delete_group(
+    group_id: str,
+    current_user: Optional[str] = Query(None, description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
+):
+    cu = _parse_current_user(current_user)
     # Only group owner can delete (dissolve) the group
 
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        # 确保用户存在且身份正确
+        _ensure_caller_identity(cursor, cu)
         cursor.execute("SELECT `id` FROM `groups` WHERE `group_id` = %s", (group_id,))
         row = cursor.fetchone()
         if not row:
@@ -801,7 +782,7 @@ async def add_group_member(
                 # 查询该教师的学生
                 cursor.execute(
                     """
-                    SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email, s.grade, s.class_name
+                    SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email
                     FROM students s
                     INNER JOIN papers p ON s.id = p.owner_id
                     WHERE p.teacher_id = %s
@@ -822,7 +803,7 @@ async def add_group_member(
                 # 通过 papers 表查询与该教师关联的学生
                 cursor.execute(
                     """
-                    SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email, s.grade, s.class_name
+                    SELECT DISTINCT s.id, s.student_id, s.name, s.phone, s.email
                     FROM students s
                     INNER JOIN papers p ON s.id = p.owner_id
                     WHERE p.teacher_id = %s
@@ -886,16 +867,15 @@ async def add_group_member(
                 # 插入成员，所有成员默认为普通成员
                 cursor.execute(
                     """
-                    INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`)
-                    VALUES (%s, %s, %s, %s, 1, NOW())
-                    ON DUPLICATE KEY UPDATE `is_active` = 1, `role` = VALUES(`role`), `updated_at`=NOW()
+                    INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `is_active`, `joined_at`)
+                    VALUES (%s, %s, %s, 1, NOW())
+                    ON DUPLICATE KEY UPDATE `is_active` = 1, `updated_at`=NOW()
                     """,
-                    (group_id, sid, "student", "member"),
+                    (group_id, sid, "student"),
                 )
                 added_members.append({
                     "member_id": sid,
-                    "member_type": "student",
-                    "role": "member"
+                    "member_type": "student"
                 })
             
             conn.commit()
@@ -929,18 +909,17 @@ async def add_group_member(
             # insert as active member，所有成员默认为普通成员
             cursor.execute(
                 """
-                INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`, `is_active`, `joined_at`)
-                VALUES (%s, %s, %s, %s, 1, NOW())
-                ON DUPLICATE KEY UPDATE `is_active` = 1, `role` = VALUES(`role`), `updated_at`=NOW()
+                INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `is_active`, `joined_at`)
+                VALUES (%s, %s, %s, 1, NOW())
+                ON DUPLICATE KEY UPDATE `is_active` = 1, `updated_at`=NOW()
                 """,
-                (group_id, member_id, "student", "member"),
+                (group_id, member_id, "student"),
             )
             conn.commit()
             return {
                 "group_id": group_id,
                 "member_id": member_id,
                 "member_type": "student",
-                "role": "member",
                 "message": "成员已添加/更新",
             }
     except HTTPException:
@@ -961,11 +940,16 @@ async def add_group_member(
     summary="删除群组成员",
     description="从指定群组移除成员（软删除，设置 is_active=0）"
 )
-async def remove_group_member(group_id: str, payload: GroupMember):
-    cu = _parse_current_user(payload.current_user.model_dump())
+async def remove_group_member(
+    group_id: str,
+    member_id: int,
+    member_type: str = "student",  # 学生 student / 教师 teacher / 管理员 admin
+    current_user: Optional[str] = Query(None, description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
+):
+    cu = _parse_current_user(current_user)
     # only owner or group admin can remove members
 
-    if payload.member_type not in ["student", "teacher", "admin"]:
+    if member_type not in ["student", "teacher", "admin"]:
         raise HTTPException(status_code=400, detail="成员类型必须是student、teacher或admin")
 
     conn = get_connection()
@@ -994,7 +978,7 @@ async def remove_group_member(group_id: str, payload: GroupMember):
         # check target member exists in group
         cursor.execute(
             "SELECT 1 FROM `group_members` WHERE `group_id`=%s AND `member_id`=%s AND `member_type`=%s AND `is_active`=1",
-            (group_id, payload.member_id, payload.member_type),
+            (group_id, member_id, member_type),
         )
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="成员不在该群组或已被移除")
@@ -1003,13 +987,13 @@ async def remove_group_member(group_id: str, payload: GroupMember):
 
         cursor.execute(
             "UPDATE `group_members` SET `is_active` = 0 WHERE `group_id` = %s AND `member_id` = %s AND `member_type` = %s",
-            (group_id, payload.member_id, payload.member_type),
+            (group_id, member_id, member_type),
         )
         conn.commit()
         return {
             "group_id": group_id,
-            "member_id": payload.member_id,
-            "member_type": payload.member_type,
+            "member_id": member_id,
+            "member_type": member_type,
             "message": "成员已移除",
         }
     except HTTPException:
@@ -1046,6 +1030,8 @@ async def get_group_members(
     cursor = None
     try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
+        # 确保用户存在且身份正确
+        _ensure_caller_identity(cursor, cu)
 
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
         if not cursor.fetchone():
@@ -1068,16 +1054,13 @@ async def get_group_members(
                 gm.group_id,
                 gm.member_id,
                 gm.member_type,
-                gm.role,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
                 s.student_id AS account_id,
                 s.name,
                 s.phone,
-                s.email,
-                s.grade,
-                s.class_name
+                s.email
             FROM group_members gm
             JOIN students s ON s.id = gm.member_id
             WHERE gm.group_id = %s AND gm.member_type = 'student'{active_clause}
@@ -1092,7 +1075,6 @@ async def get_group_members(
                 gm.group_id,
                 gm.member_id,
                 gm.member_type,
-                gm.role,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
@@ -1116,7 +1098,6 @@ async def get_group_members(
                 gm.group_id,
                 gm.member_id,
                 gm.member_type,
-                gm.role,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
@@ -1156,7 +1137,6 @@ async def get_group_members(
                 {
                     "member_id": m.get("member_id"),
                     "member_type": m.get("member_type"),
-                    "role": m.get("role"),
                     "is_active": int(m.get("is_active", 0)) if m.get("is_active") is not None else None,
                     "joined_at": _fmt_time(m.get("joined_at")),
                     "updated_at": _fmt_time(m.get("updated_at")),
@@ -1164,8 +1144,6 @@ async def get_group_members(
                     "name": m.get("name"),
                     "phone": m.get("phone"),
                     "email": m.get("email"),
-                    "grade": m.get("grade"),
-                    "class_name": m.get("class_name"),
                     "department": m.get("department"),
                     "title": m.get("title"),
                     "admin_role": m.get("admin_role"),
@@ -1204,6 +1182,8 @@ async def get_class_students(
     cursor = None
     try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
+        # 确保用户存在且身份正确
+        _ensure_caller_identity(cursor, cu)
         
         # 验证群组是否存在
         cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
@@ -1217,7 +1197,6 @@ async def get_class_students(
             s.name as student_name,
             s.student_id as student_number,
             p.id as paper_id,
-            p.latest_version as paper_version,
             p.updated_at as paper_update_time,
             (SELECT COUNT(*) FROM annotations WHERE paper_id = p.id) as annotation_count
         FROM
@@ -1264,7 +1243,6 @@ async def get_class_students(
                 if paper_info.get('student_id') == student_id:
                     student_info["papers"].append({
                         "paper_id": paper_id,
-                        "paper_version": f"v{paper_info.get('paper_version', 1)}",
                         "paper_update_time": paper_info.get('paper_update_time').strftime("%Y-%m-%d %H:%M:%S") if paper_info.get('paper_update_time') else None,
                         "annotation_count": paper_info.get('annotation_count', 0)
                     })
@@ -1351,7 +1329,6 @@ async def get_group_papers(
             s.name as student_name,
             s.student_id as student_number,
             p.id as paper_id,
-            p.latest_version as paper_version,
             p.updated_at as paper_update_time,
             p.oss_key as paper_oss_key,
             (SELECT COUNT(*) FROM annotations WHERE paper_id = p.id) as annotation_count
@@ -1390,7 +1367,6 @@ async def get_group_papers(
                 "student_id": paper_info.get('student_id'),
                 "student_name": paper_info.get('student_name'),
                 "student_number": paper_info.get('student_number'),
-                "paper_version": f"v{paper_info.get('paper_version', 1)}",
                 "paper_update_time": paper_info.get('paper_update_time').strftime("%Y-%m-%d %H:%M:%S") if paper_info.get('paper_update_time') else None,
                 "annotation_count": paper_info.get('annotation_count', 0),
                 "oss_key": paper_info.get('paper_oss_key')
@@ -1412,27 +1388,19 @@ async def get_group_papers(
         conn.close()
 
 
-class BatchDownloadRequest(BaseModel):
-    """批量下载请求体"""
-    group_id: str
-    student_ids: List[int] | None = None
-    format: str = "zip"
-    current_user: CurrentUser
-
-
 @router.post(
     "/download/batch",
     summary="批量下载群组论文",
     description="管理员或老师批量下载指定群组的学生论文，支持zip和原格式下载"
 )
 async def batch_download_papers(
-    payload: BatchDownloadRequest
+    group_id: str,
+    student_ids: List[int] | None = None,
+    format: str = "zip",
+    current_user: Optional[str] = Query(None, description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
 ):
     """批量下载群组论文的实现"""
-    cu = _parse_current_user(payload.current_user.model_dump())
-    group_id = payload.group_id
-    student_ids = payload.student_ids
-    format = payload.format
+    cu = _parse_current_user(current_user)
     roles_norm = _normalize_roles(cu.get("roles", []))
     
     # 验证权限：只有管理员或教师可以批量下载论文
@@ -1470,8 +1438,7 @@ async def batch_download_papers(
             s.name as student_name,
             s.student_id as student_number,
             p.id as paper_id,
-            p.oss_key as oss_key,
-            p.latest_version as paper_version
+            p.oss_key as oss_key
         FROM
             students s
         JOIN
@@ -1508,7 +1475,6 @@ async def batch_download_papers(
                     "student_id": row.get('student_id'),
                     "student_name": row.get('student_name'),
                     "student_number": row.get('student_number'),
-                    "paper_version": row.get('paper_version'),
                     "oss_key": row.get('oss_key')
                 })
         
