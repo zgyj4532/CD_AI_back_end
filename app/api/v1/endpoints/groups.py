@@ -243,7 +243,7 @@ def list_groups(
                 ) AS reviewed_papers
             FROM `groups` g
             WHERE EXISTS (
-                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_type='teacher' AND gm2.member_id = %s AND gm2.is_active=1
+                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_id = %s AND gm2.is_active=1
             )
             AND (g.group_id LIKE %s OR g.group_name LIKE %s)
             ORDER BY g.created_at DESC
@@ -260,7 +260,7 @@ def list_groups(
             SELECT COUNT(*) AS total
             FROM `groups` g
             WHERE EXISTS (
-                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_type='teacher' AND gm2.member_id = %s AND gm2.is_active=1
+                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_id = %s AND gm2.is_active=1
             )
             AND (g.group_id LIKE %s OR g.group_name LIKE %s)
             """
@@ -541,6 +541,21 @@ async def create_group(
                 "INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `is_active`, `joined_at`) VALUES (%s, %s, %s, 1, NOW()) ON DUPLICATE KEY UPDATE is_active=1",
                 (group_id_value, cu.get("sub", 0), creator_member_type),
             )
+            
+            # if teacher_id is provided, add the teacher as a member
+            if teacher_id:
+                # find the teacher's internal id by teacher_id
+                cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (teacher_id.strip(),))
+                teacher_row = cursor.fetchone()
+                if teacher_row:
+                    teacher_internal_id = teacher_row[0] if isinstance(teacher_row, tuple) else teacher_row.get("id")
+                    cursor.execute(
+                        "INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `is_active`, `joined_at`) VALUES (%s, %s, %s, 1, NOW()) ON DUPLICATE KEY UPDATE is_active=1",
+                        (group_id_value, teacher_internal_id, "teacher"),
+                    )
+                else:
+                    # teacher not found, but continue with group creation
+                    logger.warning(f"Teacher with teacher_id {teacher_id} not found, group created without teacher as member")
         except Exception:
             # if owner insert fails, rollback group creation as atomic
             conn.rollback()
