@@ -1095,7 +1095,7 @@ def download_paper(
     "/ddl/create",
     response_model=DDLOut,
     summary="创建DDL截止时间",
-    description="仅教师可创建，且登录用户ID必须与教师ID一致，截止时间需精确到年月日时分秒"
+    description="仅教师可创建，且登录用户ID必须与教师ID一致，截止时间需精确到年月日时分秒，需指定群组ID发送给该群组所有人"
 )
 def create_ddl(
     year: str = Query(
@@ -1129,6 +1129,7 @@ def create_ddl(
         enum=[str(s) for s in range(0, 60)]
     ),
     teacher_id: int = Query(..., description="教师ID（必须为正整数）"),
+    group_id: str = Query(..., description="群组ID（对应groups表的group_id）"),
     db: pymysql.connections.Connection = Depends(get_db),
     current_user: Optional[str] = Query(None, description="登录用户信息(JSON字符串，包含 sub/username/roles)"),
 ):
@@ -1151,6 +1152,9 @@ def create_ddl(
             status_code=403,
             detail=f"无权限创建DDL：传入的教师ID({teacher_id})与登录用户ID({login_user_id})不一致"
         )
+    # 验证group_id
+    if not group_id:
+        raise HTTPException(status_code=400, detail="group_id不能为空")
     # 时间参数转换与校验
     try:
         year_int = int(year)
@@ -1172,6 +1176,14 @@ def create_ddl(
     cursor = None
     try:
         cursor = db.cursor()
+        # 验证group_id是否存在于groups表
+        cursor.execute("SELECT group_id, group_name FROM `groups` WHERE group_id = %s", (group_id,))
+        group_info = cursor.fetchone()
+        if not group_info:
+            raise HTTPException(status_code=404, detail=f"群组ID {group_id} 不存在")
+        group_name = group_info[1]
+        
+        # 创建DDL记录
         create_sql = """
         INSERT INTO ddl_management (teacher_id, teacher_name, ddl_time, created_at, updated_at)
         VALUES (%s, %s, %s, %s, %s)
@@ -1182,21 +1194,45 @@ def create_ddl(
             (teacher_id, teacher_name, ddl_time, create_time, create_time)
         )
         ddlid = cursor.lastrowid
+        
+        # 获取群组所有成员
+        cursor.execute("SELECT member_id, member_type FROM group_members WHERE group_id = %s AND is_active = 1", (group_id,))
+        members = cursor.fetchall()
+        
+        # 发送消息给群组所有成员
+        for member_id, member_type in members:
+            # 构造消息内容
+            message_title = f"【DDL通知】{group_name}"
+            message_content = f"尊敬的用户，您所在的群组 {group_name} 已设置新的DDL截止时间：{ddl_time.strftime('%Y-%m-%d %H:%M:%S')}，请及时完成任务。"
+            
+            # 插入消息记录
+            message_sql = """
+            INSERT INTO user_messages (user_id, username, title, content, source, status, received_time, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(
+                message_sql, 
+                (str(member_id), f"{member_type}_{member_id}", message_title, message_content, "ddl", "unread", create_time, create_time, create_time)
+            )
+        
         db.commit()
         return DDLOut(
             ddlid=ddlid,
+            creator_id=teacher_id,
             teacher_id=teacher_id,
-            teacher_name=teacher_name,
             ddl_time=ddl_time.strftime("%Y-%m-%d %H:%M:%S"),
-            created_at=create_time,
-            updated_at=create_time
+            created_at=create_time
         )
     except pymysql.MySQLError as e:
-        db.rollback()
+        if db:
+            db.rollback()
         raise HTTPException(status_code=500, detail=f"创建DDL失败：{str(e)}")
     finally:
         if cursor:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
 @router.get(
     "/ddl/list",
@@ -1245,17 +1281,20 @@ def list_ddl(
             
             result.append(DDLOut(
                 ddlid=record["ddlid"],
+                creator_id=record["teacher_id"],
                 teacher_id=record["teacher_id"],
-                teacher_name=record["teacher_name"],
                 ddl_time=ddl_time_str,
-                created_at=created_at_str,
-                updated_at=updated_at_str
+                created_at=created_at_str
             ))
+        return result
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"查询DDL失败：{str(e)}")
     finally:
         if cursor:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
 @router.delete(
     "/ddl/{ddlid}",
@@ -1308,11 +1347,15 @@ def delete_ddl(
             "deleted_teacher_info": {"teacher_id": ddl_teacher_id, "teacher_name": ddl_teacher_name}
         }
     except pymysql.MySQLError as e:
-        db.rollback()
+        if db:
+            db.rollback()
         raise HTTPException(status_code=500, detail=f"删除DDL失败：{str(e)}")
     finally:
         if cursor:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
 @router.put(
     "/ddl/{ddlid}",
@@ -1426,15 +1469,18 @@ def update_ddl(
         # 5. 构造返回结果
         return DDLOut(
             ddlid=updated_row[0],
+            creator_id=updated_row[1],
             teacher_id=updated_row[1],
-            teacher_name=updated_row[2],
             ddl_time=updated_row[3].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[3], datetime) else updated_row[3],
-            created_at=updated_row[4].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[4], datetime) else updated_row[4],
-            updated_at=updated_row[5].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[5], datetime) else updated_row[5]
+            created_at=updated_row[4].strftime("%Y-%m-%d %H:%M:%S") if isinstance(updated_row[4], datetime) else updated_row[4]
         )
     except pymysql.MySQLError as e:
-        db.rollback()
+        if db:
+            db.rollback()
         raise HTTPException(status_code=500, detail=f"更新DDL失败：{str(e)}")
     finally:
         if cursor:
-            cursor.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
