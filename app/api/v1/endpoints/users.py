@@ -549,11 +549,18 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             raise HTTPException(status_code=400, detail="password 不能为空")
 
         # 账号映射逻辑：先查映射表
-        cursor.execute(
-            "SELECT real_user_id, real_user_type FROM account_mapping WHERE virtual_account = %s",
-            (username,)
-        )
-        mapping = cursor.fetchone()
+        mapping = None
+        try:
+            cursor.execute(
+                "SELECT real_user_id, real_user_type FROM account_mapping WHERE virtual_account = %s",
+                (username,)
+            )
+            mapping = cursor.fetchone()
+        except pymysql.MySQLError as e:
+            if getattr(e, "args", [None])[0] == 1146:
+                logger.warning("account_mapping table missing, skip virtual account mapping")
+            else:
+                raise
         if mapping:
             real_user_id = mapping["real_user_id"]
             real_user_type = mapping["real_user_type"]

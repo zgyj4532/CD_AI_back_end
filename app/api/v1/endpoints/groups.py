@@ -243,7 +243,7 @@ def list_groups(
                 ) AS reviewed_papers
             FROM `groups` g
             WHERE EXISTS (
-                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_id = %s AND gm2.is_active=1
+                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_type='teacher' AND gm2.member_id = %s AND gm2.is_active=1
             )
             AND (g.group_id LIKE %s OR g.group_name LIKE %s)
             ORDER BY g.created_at DESC
@@ -260,7 +260,7 @@ def list_groups(
             SELECT COUNT(*) AS total
             FROM `groups` g
             WHERE EXISTS (
-                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_id = %s AND gm2.is_active=1
+                SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_type='teacher' AND gm2.member_id = %s AND gm2.is_active=1
             )
             AND (g.group_id LIKE %s OR g.group_name LIKE %s)
             """

@@ -181,6 +181,20 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 	- PUT  `/users/{user_id}/bind-email`（绑定/更新邮箱）
 	- POST `/users/{user_id}/bind-group`（绑定群组）
 
+## 认证与密码安全
+
+- 密码存储：用户密码不会以明文保存，创建/导入用户时使用 bcrypt 生成哈希值后写入数据库（见 app/core/security.py 的 `get_password_hash`）。
+- 登录校验：登录时使用 `verify_password` 将用户输入密码与数据库中的 bcrypt 哈希进行比对，防止明文泄露风险。
+- 登录流程：
+	1) 客户端提交 `username`、`password`（可选 `user_type`）。
+	2) 优先检查 `account_mapping` 虚拟账号映射，若存在则按映射的真实用户表校验密码。
+	3) 若无映射：指定了 `user_type` 则只查对应表；未指定则依次在 admins/teachers/students 的账号字段（admin_id/teacher_id/student_id）中查找候选用户。
+	4) 对候选用户逐一进行 bcrypt 哈希校验：
+		- 无匹配或校验失败：返回 401 Unauthorized。
+		- 多个匹配：返回 400，提示需明确 `user_type`。
+		- 唯一匹配：生成 JWT `access_token`，返回用户信息（不含密码）。
+- 授权：JWT 载荷包含 `sub/username/roles/user_type`，后续接口可基于角色控制访问对应业务数据。
+
 ## 注意事项 
 
 - 认证与权限：当前部分接口使用模拟用户，实际接入请启用 [app/core/dependencies.py](app/core/dependencies.py) 与 [app/core/security.py](app/core/security.py)。
