@@ -9,8 +9,10 @@ class PaperCreate(BaseModel):
 class PaperOut(BaseModel):
     id: int
     owner_id: int
+    teacher_id: int
     latest_version: str
     oss_key: Optional[str]
+    pdf_oss_key: Optional[str]
 
 
 class VersionOut(BaseModel):

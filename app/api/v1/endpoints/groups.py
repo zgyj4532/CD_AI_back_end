@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File,  HTTPException, Query, Header
+from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from pydantic import BaseModel  
 import json
@@ -6,6 +7,9 @@ import pymysql
 from datetime import datetime  
 from loguru import logger  
 from app.database import get_connection
+import io
+import zipfile
+from app.services.oss import get_file_from_oss
 
 router = APIRouter()
 
@@ -1566,17 +1570,39 @@ async def selected_download_papers(
         if not papers_to_download:
             raise HTTPException(status_code=404, detail="未找到指定的论文")
         
-        # 处理论文下载（模拟实现）
-        return {
-            "format": "zip",
-            "total_papers": len(papers_to_download),
-            "papers": papers_to_download,
-            "message": f"成功准备{len(papers_to_download)}篇论文，格式为zip"
-        }
+        # 创建内存中的 zip 文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for paper in papers_to_download:
+                oss_key = paper.get('oss_key')
+                if oss_key:
+                    try:
+                        # 从 OSS 获取文件
+                        filename, content = get_file_from_oss(oss_key)
+                        # 构建文件路径，包含学生信息
+                        student_info = f"{paper.get('student_name')}_{paper.get('student_number')}"
+                        zip_file.writestr(f"{student_info}/{filename}", content)
+                    except Exception as e:
+                        logger.error(f"获取论文文件失败: {str(e)}")
+                        # 跳过失败的文件，继续处理其他文件
+        
+        # 重置文件指针到开始位置
+        zip_buffer.seek(0)
+        
+        # 返回流式响应
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename=papers_{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
+            }
+        )
     except HTTPException:
         raise
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载失败：{str(e)}")
     finally:
         if cursor:
             cursor.close()
