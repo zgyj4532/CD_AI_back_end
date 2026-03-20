@@ -1368,6 +1368,7 @@ async def get_group_papers(
             p.id as paper_id,
             p.updated_at as paper_update_time,
             p.oss_key as paper_oss_key,
+            p.pdf_oss_key as paper_pdf_oss_key,
             (SELECT COUNT(*) FROM annotations WHERE paper_id = p.id) as annotation_count
         FROM
             students s
@@ -1406,7 +1407,8 @@ async def get_group_papers(
                 "student_number": paper_info.get('student_number'),
                 "paper_update_time": paper_info.get('paper_update_time').strftime("%Y-%m-%d %H:%M:%S") if paper_info.get('paper_update_time') else None,
                 "annotation_count": paper_info.get('annotation_count', 0),
-                "oss_key": paper_info.get('paper_oss_key')
+                "oss_key": paper_info.get('paper_oss_key'),
+                "pdf_oss_key": paper_info.get('paper_pdf_oss_key')
             })
         
         return {
@@ -1530,6 +1532,108 @@ async def batch_download_papers(
         if cursor:
             cursor.close()
         conn.close()
+
+
+@router.post(
+    "/download/selected",
+    summary="选择下载论文",
+    description="管理员或老师通过指定论文ID列表选择下载论文，格式为zip"
+)
+async def selected_download_papers(
+    paper_ids: str = Query(..., description="论文ID列表，用英文逗号分隔，例如: 1,2,3,4,5"),
+    current_user: Optional[str] = Query(None, description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
+):
+    """选择下载论文的实现"""
+    cu = _parse_current_user(current_user)
+    roles_norm = _normalize_roles(cu.get("roles", []))
+    
+    # 验证权限：只有管理员或教师可以选择下载论文
+    if not ("admin" in roles_norm or "teacher" in roles_norm):
+        raise HTTPException(status_code=403, detail="仅管理员或教师可选择下载论文")
+
+    # 解析论文ID列表
+    paper_id_list = _parse_paper_ids(paper_ids)
+    if not paper_id_list:
+        raise HTTPException(status_code=400, detail="请提供有效的论文ID列表")
+
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        
+        # 获取论文信息
+        papers_to_download = _get_papers_by_ids(cursor, paper_id_list)
+        if not papers_to_download:
+            raise HTTPException(status_code=404, detail="未找到指定的论文")
+        
+        # 处理论文下载（模拟实现）
+        return {
+            "format": "zip",
+            "total_papers": len(papers_to_download),
+            "papers": papers_to_download,
+            "message": f"成功准备{len(papers_to_download)}篇论文，格式为zip"
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+        conn.close()
+
+
+def _parse_paper_ids(paper_ids_str: str) -> list[int]:
+    """解析论文ID列表"""
+    paper_ids = []
+    for id_str in paper_ids_str.split(","):
+        id_str = id_str.strip()
+        if id_str:
+            try:
+                paper_ids.append(int(id_str))
+            except ValueError:
+                pass
+    return paper_ids
+
+
+def _get_papers_by_ids(cursor, paper_ids: list[int]) -> list[dict]:
+    """根据论文ID列表获取论文信息"""
+    if not paper_ids:
+        return []
+    
+    # 构建SQL查询
+    placeholders = ', '.join(['%s'] * len(paper_ids))
+    sql = f"""
+    SELECT
+        p.id as paper_id,
+        s.id as student_id,
+        s.name as student_name,
+        s.student_id as student_number,
+        p.oss_key as oss_key
+    FROM
+        papers p
+    JOIN
+        students s ON p.owner_id = s.id
+    WHERE
+        p.id IN ({placeholders})
+    ORDER BY
+        s.name ASC
+    """
+    
+    cursor.execute(sql, paper_ids)
+    rows = cursor.fetchall()
+    
+    papers = []
+    for row in rows:
+        papers.append({
+            "paper_id": row.get('paper_id'),
+            "student_id": row.get('student_id'),
+            "student_name": row.get('student_name'),
+            "student_number": row.get('student_number'),
+            "oss_key": row.get('oss_key')
+        })
+    
+    return papers
 
 
 # 移除设置群组管理员教师的功能，不再需要群组管理员设定

@@ -9,7 +9,6 @@ import sys
 import shutil
 import subprocess
 import tempfile
-from app.core.dependencies import get_current_user
 from app.schemas.document import (
     PaperOut,
     PaperStatusOut,
@@ -251,7 +250,7 @@ async def upload_paper(
         if cursor: 
             cursor.close()
 
-    return PaperOut(id=paper_id, owner_id=owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key, pdf_oss_key=pdf_oss_key)
+    return PaperOut(id=paper_id, owner_id=owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key)
 
 
 @router.put(
@@ -368,7 +367,7 @@ async def update_paper(
             )
         )
         db.commit()
-        return PaperOut(id=paper_id, owner_id=paper_owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key, pdf_oss_key=pdf_oss_key)
+        return PaperOut(id=paper_id, owner_id=paper_owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key)
     except pymysql.MySQLError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"数据库操作失败: {str(e)}")
@@ -626,7 +625,7 @@ def update_paper_status(
         if current_status == "已定稿":
             raise HTTPException(
                 status_code=403,
-                detail=f"论文最近有效状态为【已定稿】，不允许修改任何状态"
+                detail="论文最近有效状态为【已定稿】，不允许修改任何状态"
             )
         if status not in allowed_target_status:
             role_name = "学生" if is_student else "老师"
@@ -1297,13 +1296,13 @@ def create_ddl(
         
         # 创建DDL记录
         create_sql = """
-        INSERT INTO ddl_management (teacher_id, teacher_name, ddl_time, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO ddl_management (teacher_id, teacher_name, group_id, ddl_time, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """
         create_time = now.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute(
             create_sql, 
-            (teacher_id, teacher_name, ddl_time, create_time, create_time)
+            (teacher_id, teacher_name, group_id, ddl_time, create_time, create_time)
         )
         ddlid = cursor.lastrowid
         
@@ -1315,12 +1314,13 @@ def create_ddl(
             
             # 插入消息记录
             message_sql = """
-            INSERT INTO user_messages (user_id, username, title, content, source, status, received_time, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO user_messages (user_id, username, title, content, source, status, received_time, created_at, updated_at, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
+            metadata = json.dumps({"ddlid": ddlid, "group_id": group_id, "group_name": group_name})
             cursor.execute(
                 message_sql, 
-                (str(member_id), f"{member_type}_{member_id}", message_title, message_content, "ddl", "unread", create_time, create_time, create_time)
+                (str(member_id), f"{member_type}_{member_id}", message_title, message_content, "ddl", "unread", create_time, create_time, create_time, metadata)
             )
         
         db.commit()
@@ -1385,7 +1385,6 @@ def list_ddl(
             # 处理datetime对象转字符串
             ddl_time_str = record["ddl_time"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["ddl_time"], datetime) else record["ddl_time"]
             created_at_str = record["created_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["created_at"], datetime) else record["created_at"]
-            updated_at_str = record["updated_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["updated_at"], datetime) else record["updated_at"]
             
             result.append(DDLOut(
                 ddlid=record["ddlid"],
@@ -1523,7 +1522,7 @@ def cleanup_expired_ddl(
                 # 提交事务
                 db.commit()
                 
-            except Exception as e:
+            except Exception:
                 # 回滚事务
                 if db:
                     db.rollback()
@@ -1586,17 +1585,55 @@ def delete_ddl(
                 status_code=403,
                 detail=f"无权限删除：仅创建该DDL的教师（ID={ddl_teacher_id}）或管理员可删除，当前登录用户ID={login_user_id}"
             )
+        
+        # 获取group_id和ddl_time用于匹配消息
+        group_id = None
+        ddl_time_str = None
+        try:
+            cursor.execute("SELECT group_id, ddl_time FROM ddl_management WHERE ddlid = %s", (ddlid,))
+            row = cursor.fetchone()
+            if row:
+                group_id = row[0]
+                ddl_time = row[1]
+                if ddl_time:
+                    ddl_time_str = ddl_time.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+        
         # 删除操作
+        # 先删除相关的消息记录
+        deleted_messages_count = 0
+        
+        # 方式1：通过metadata中的ddlid匹配
+        if ddlid:
+            delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND metadata LIKE %s"
+            cursor.execute(delete_messages_sql, (f'%\"ddlid\": {ddlid}%',))
+            deleted_messages_count = cursor.rowcount
+        
+        # 方式2：如果metadata方式没找到，通过group_id匹配
+        if deleted_messages_count == 0 and group_id:
+            delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND metadata LIKE %s"
+            cursor.execute(delete_messages_sql, (f'%\"group_id\": {group_id}%',))
+            deleted_messages_count = cursor.rowcount
+        
+        # 方式3：如果metadata方式没找到，尝试通过消息内容匹配
+        if deleted_messages_count == 0 and ddl_time_str:
+            delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND content LIKE %s"
+            cursor.execute(delete_messages_sql, (f'%{ddl_time_str}%',))
+            deleted_messages_count = cursor.rowcount
+        
+        # 再删除DDL记录
         delete_sql = "DELETE FROM ddl_management WHERE ddlid = %s"
         cursor.execute(delete_sql, (ddlid,))
         db.commit()
         
         return {
             "message": f"DDL {ddlid} 删除成功",
-            "ddlid": ddlid,
-            "deleted_by": login_user_id,
-            "deleted_by_role": login_user_roles,
-            "deleted_teacher_info": {"teacher_id": ddl_teacher_id, "teacher_name": ddl_teacher_name}
+            "ddlid": str(ddlid),
+            "deleted_messages_count": str(deleted_messages_count),
+            "deleted_by": str(login_user_id),
+            "deleted_by_role": ",".join(login_user_roles) if login_user_roles else "",
+            "deleted_teacher_info": f"教师ID:{ddl_teacher_id},教师姓名:{ddl_teacher_name}"
         }
     except pymysql.MySQLError as e:
         if db:

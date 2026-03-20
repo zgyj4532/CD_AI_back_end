@@ -50,21 +50,6 @@ DEFAULT_DB_URL = os.getenv(
 )
 
 
-ACCOUNT_MAPPING_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS `account_mapping` (
-    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
-    `virtual_account` VARCHAR(128) NOT NULL COMMENT '虚拟账号，用于映射真实账号',
-    `real_user_id` BIGINT UNSIGNED NOT NULL COMMENT '真实用户ID',
-    `real_user_type` ENUM('student','teacher','admin') NOT NULL COMMENT '真实用户类型',
-    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uniq_virtual_account` (`virtual_account`),
-    KEY `idx_real_user` (`real_user_id`, `real_user_type`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='虚拟账号映射表';
-"""
-
-
 SCHOOLS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `schools` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
@@ -243,6 +228,7 @@ CREATE TABLE IF NOT EXISTS `papers` (
     `id` INT NOT NULL AUTO_INCREMENT COMMENT '论文ID',
     `owner_id` INT NOT NULL COMMENT '所有者ID',
     `teacher_id` INT NOT NULL COMMENT '老师ID',
+    `teacher_name` VARCHAR(128) NOT NULL COMMENT '老师姓名', 
     `version` VARCHAR(20) NOT NULL COMMENT '当前版本号',
     `size` INT NOT NULL COMMENT '文件大小（字节）',
     `status` VARCHAR(32) NOT NULL COMMENT '状态（uploaded:已上传, processing:处理中, completed:完成, rejected:驳回）',
@@ -259,6 +245,7 @@ CREATE TABLE IF NOT EXISTS `papers` (
     PRIMARY KEY (`id`),
     KEY `idx_owner_id` (`owner_id`),
     KEY `idx_teacher_id` (`teacher_id`),
+    KEY `idx_teacher_name` (`teacher_name`),
     KEY `idx_version` (`version`),
     KEY `idx_status` (`status`),
     KEY `idx_operated_time` (`operated_time`)
@@ -270,6 +257,7 @@ PAPERS_HISTORY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `papers_history` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '历史版本ID',
     `paper_id` INT NOT NULL COMMENT '论文ID',
+    `teacher_name` VARCHAR(128) NOT NULL COMMENT '老师姓名',
     `version` VARCHAR(20) NOT NULL COMMENT '历史版本号',
     `size` INT NOT NULL COMMENT '文件大小（字节）',
     `status` VARCHAR(32) NOT NULL COMMENT '状态（如uploaded, processing, completed等）',
@@ -285,6 +273,7 @@ CREATE TABLE IF NOT EXISTS `papers_history` (
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     PRIMARY KEY (`id`),
     KEY `idx_papers_history_paper_id` (`paper_id`),
+    KEY `idx_papers_history_teacher_name` (`teacher_name`),
     KEY `idx_papers_history_version` (`version`),
     KEY `idx_papers_history_status` (`status`),
     KEY `idx_papers_history_created_at` (`created_at`),
@@ -335,12 +324,14 @@ CREATE TABLE IF NOT EXISTS `ddl_management` (
     ddlid INT PRIMARY KEY AUTO_INCREMENT COMMENT 'DDL唯一ID',
     teacher_id INT NOT NULL COMMENT '教师ID）',
     teacher_name VARCHAR(50) NOT NULL COMMENT '教师姓名', 
+    group_id INT NOT NULL COMMENT '群组ID',
     ddl_time DATETIME NOT NULL COMMENT '截止时间（精确到秒）',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_teacher_id (teacher_id),
     INDEX idx_ddl_time (ddl_time),
-    INDEX idx_teacher_name (teacher_name) 
+    INDEX idx_teacher_name (teacher_name),
+    INDEX idx_group_id (group_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='论文DDL截止时间管理表';
 """
 
@@ -422,7 +413,6 @@ def init_db(database_url: str | None = None) -> None:
     try:
         with conn.cursor() as cur:
             for sql in (
-                ACCOUNT_MAPPING_TABLE_SQL,
                 SCHOOLS_TABLE_SQL,
                 DEPARTMENTS_TABLE_SQL,
                 STUDENTS_TABLE_SQL,
@@ -442,7 +432,7 @@ def init_db(database_url: str | None = None) -> None:
             ):
                 cur.execute(sql)
         print(
-            "Tables ensured: account_mapping, schools, departments, students, teachers, admins, file_records, groups, group_members, "
+            "Tables ensured: schools, departments, students, teachers, admins, file_records, groups, group_members, "
             "papers, papers_history, paper_reviews, annotations, ddl_management, templates, "
             "user_messages, operation_logs"
         )
@@ -629,6 +619,7 @@ TABLE_COLUMN_DEFINITIONS = {
         "ddlid": "`ddlid` INT AUTO_INCREMENT COMMENT 'DDL唯一ID'",
         "teacher_id": "`teacher_id` INT NOT NULL COMMENT '教师ID）'",
         "teacher_name": "`teacher_name` VARCHAR(50) NOT NULL COMMENT '教师姓名'",
+        "group_id": "`group_id` INT NOT NULL COMMENT '群组ID'",
         "ddl_time": "`ddl_time` DATETIME NOT NULL COMMENT '截止时间（精确到秒）'",
         "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'",
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
@@ -669,19 +660,6 @@ TABLE_COLUMN_DEFINITIONS = {
         "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
         "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'success' COMMENT '操作状态（success/failure）'",
-    },
-    "user_messages": {
-        "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '消息ID'",
-        "user_id": "`user_id` VARCHAR(64) NOT NULL COMMENT '接收用户ID'",
-        "username": "`username` VARCHAR(64) DEFAULT NULL COMMENT '接收用户名'",
-        "title": "`title` VARCHAR(255) NOT NULL COMMENT '消息标题'",
-        "content": "`content` TEXT NOT NULL COMMENT '消息内容'",
-        "source": "`source` VARCHAR(64) DEFAULT NULL COMMENT '来源（系统/业务模块）'",
-        "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'unread' COMMENT '状态（unread/read）'",
-        "received_time": "`received_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '接收时间'",
-        "metadata": "`metadata` JSON DEFAULT NULL COMMENT '扩展元数据'",
-        "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
-        "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
     },
 }
 
@@ -767,7 +745,8 @@ TABLE_INDEX_DEFINITIONS = {
     "ddl_management": [
         "CREATE INDEX idx_teacher_id ON `ddl_management` (teacher_id)",
         "CREATE INDEX idx_ddl_time ON `ddl_management` (ddl_time)",
-        "CREATE INDEX idx_teacher_name ON `ddl_management` (teacher_name)"
+        "CREATE INDEX idx_teacher_name ON `ddl_management` (teacher_name)",
+        "CREATE INDEX idx_group_id ON `ddl_management` (group_id)"
     ],
     "templates": [
         "CREATE UNIQUE INDEX uniq_template_id ON `templates` (template_id)",
