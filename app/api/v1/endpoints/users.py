@@ -551,7 +551,6 @@ def user_bind_school(
     role_set = {r.strip().lower() for r in current_roles}
     if role not in role_set:
         raise HTTPException(status_code=403, detail=f"current_user中的角色({current_roles})与传入的role({role})不匹配")
-
     # 业务逻辑处理
     cursor = None
     try:
@@ -632,7 +631,6 @@ def user_bind_department(
     role_set = {r.strip().lower() for r in current_roles}
     if role not in role_set:
         raise HTTPException(status_code=403, detail=f"current_user中的角色({current_roles})与传入的role({role})不匹配")
-
     # 业务逻辑处理
     cursor = None
     try:
@@ -652,7 +650,6 @@ def user_bind_department(
         user_school = cursor.fetchone()
         if not user_school or not user_school["school_id"]:
             raise HTTPException(status_code=400, detail="请先绑定学校信息，再绑定院系")
-
         # 更新用户院系信息
         update_sql = f"""
             UPDATE {table} 
@@ -1574,227 +1571,174 @@ def bind_email(
             cursor.close()
 
 
-@router.post(
-    "/teacher/submit-review",
-    summary="教师提交审阅",
-    description="教师为论文提交审阅内容，并更新论文状态为已审阅"
+
+
+
+def _validate_school_exists(cursor: pymysql.cursors.Cursor, school_id: int) -> bool:
+    """校验学校ID是否存在"""
+    cursor.execute("SELECT 1 FROM schools WHERE school_id = %s LIMIT 1", (school_id,))
+    return bool(cursor.fetchone())
+
+def _validate_department_exists(cursor: pymysql.cursors.Cursor, department_id: int) -> bool:
+    """校验院系ID是否存在"""
+    cursor.execute("SELECT 1 FROM departments WHERE department_id = %s LIMIT 1", (department_id,))
+    return bool(cursor.fetchone())
+
+def _get_school_name_by_id(cursor: pymysql.cursors.Cursor, school_id: int) -> str | None:
+    """根据学校ID获取学校名称"""
+    cursor.execute("SELECT school_name FROM schools WHERE school_id = %s LIMIT 1", (school_id,))
+    row = cursor.fetchone()
+    return row["school_name"] if row else None
+
+def _get_department_name_by_id(cursor: pymysql.cursors.Cursor, department_id: int) -> str | None:
+    """根据院系ID获取院系名称"""
+    cursor.execute("SELECT department_name FROM departments WHERE department_id = %s LIMIT 1", (department_id,))
+    row = cursor.fetchone()
+    return row["department_name"] if row else None
+
+# ========== 绑定学校接口 ==========
+@router.put(
+    "/{user_id}/bind-school",
+    response_model=UserOut,
+    summary="绑定用户学校",
+    description="为指定用户绑定/更新所属学校信息（仅管理员可操作）"
 )
-def teacher_submit_review(
-    payload: TeacherSubmitReviewRequest,
+def bind_school(
+    user_id: int,
+    payload: UserBindSchool,
     db: pymysql.connections.Connection = Depends(get_db),
-    current_user: Optional[str] = Query('{"sub": 1, "username": "teacher1", "roles": ["teacher"]}', description="登录用户信息(JSON字符串，包含 sub/username/roles)，示例：{\"sub\":1,\"username\":\"teacher1\",\"roles\":[\"teacher\"]}"),
+    user_type: str = Query("admin", description="用户类型：student/teacher/admin"),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
 ):
-    current_user = _parse_current_user(current_user)
-    login_user_id = current_user.get("sub", 0)
-    login_user_roles = current_user.get("roles", [])
-    
-    if login_user_id <= 0:
-        raise HTTPException(status_code=401, detail="请先登录后再操作")
-    
-    if not ("teacher" in login_user_roles or "教师" in login_user_roles):
-        raise HTTPException(status_code=403, detail="无权限提交审阅：仅教师角色可操作")
+    # 1. 校验管理员权限
+    current_user_info = _parse_current_user(current_user)
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
     
     cursor = None
     try:
-        cursor = db.cursor()
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 2. 标准化用户类型 & 校验用户是否存在
+        user_type = _normalize_user_type(user_type)
+        table = USER_TABLES[user_type]["table"]
+        cursor.execute(f"SELECT id FROM {table} WHERE id = %s LIMIT 1", (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
         
-        cursor.execute("SELECT id, teacher_id FROM papers WHERE id = %s", (payload.paper_id,))
-        paper_row = cursor.fetchone()
-        if not paper_row:
-            raise HTTPException(status_code=404, detail=f"论文ID {payload.paper_id} 不存在")
+        # 3. 校验学校ID是否存在
+        if not _validate_school_exists(cursor, payload.school_id):
+            raise HTTPException(status_code=404, detail="学校不存在")
         
-        paper_db_id, paper_teacher_id = paper_row
-        if paper_teacher_id != 0 and paper_teacher_id != login_user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=f"无权限提交审阅：论文ID {payload.paper_id} 关联的教师ID为 {paper_teacher_id}，当前登录教师ID为 {login_user_id}"
-            )
+        # 4. 强制从数据库获取学校名称（不再使用传入的名称）
+        school_name = _get_school_name_by_id(cursor, payload.school_id)
+        if not school_name:
+            raise HTTPException(status_code=500, detail="无法获取学校名称")
         
-        now = datetime.now()
-        review_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 5. 构造更新语句
+        update_fields = [
+            "school_id = %s",
+            "school_name = %s",
+            "updated_at = NOW()"
+        ]
+        update_params = [payload.school_id, school_name, user_id]
         
-        cursor.execute("SELECT owner_id, latest_version, oss_key, size, status FROM papers WHERE id = %s", (payload.paper_id,))
-        paper_info = cursor.fetchone()
-        student_id, version, oss_key, original_size, current_status = paper_info
-        
+        # 6. 执行更新
         cursor.execute(
-            """
-            UPDATE papers
-            SET status = %s,
-                detail = %s,
-                operated_by = %s,
-                operated_time = %s,
-                updated_at = %s
-            WHERE id = %s
-            """,
-            (
-                "已审阅",
-                payload.review_content,
-                current_user.get("username") or str(login_user_id),
-                review_time_str,
-                review_time_str,
-                payload.paper_id,
-            ),
+            f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = %s",
+            tuple(update_params)
         )
-        
-        history_sql = """
-        INSERT INTO papers_history (
-            paper_id, version, size, status, detail, oss_key,
-            submitted_by_id, submitted_by_name, submitted_by_role,
-            operated_by, operated_time, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (payload.paper_id,))
-        origin_submit = cursor.fetchone()
-        submitter_name, submitter_role = origin_submit if origin_submit else ("", "")
-        cursor.execute(
-            history_sql,
-            (
-                payload.paper_id,
-                version,
-                original_size,
-                "已审阅",
-                payload.review_content,
-                oss_key,
-                str(student_id),
-                submitter_name,
-                submitter_role,
-                current_user.get("username") or str(login_user_id),
-                review_time_str,
-                review_time_str,
-                review_time_str
-            )
-        )
-        
         db.commit()
         
-        return {
-            "message": "审阅内容提交成功，论文状态已更新为已审阅",
-            "paper_id": payload.paper_id,
-            "teacher_id": login_user_id,
-            "review_time": review_time_str,
-            "review_content": payload.review_content,
-            "status": "已审阅"
-        }
+        # 7. 查询更新后用户信息并返回
+        updated_user = _fetch_user(cursor, user_id, user_type)
+        if not updated_user:
+            raise HTTPException(status_code=500, detail="绑定学校后查询用户信息失败")
+        return UserOut(**updated_user)
     
+    except HTTPException:
+        raise
     except pymysql.MySQLError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"提交审阅失败：数据库操作错误 - {str(e)}")
+        logger.error(f"绑定学校数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="绑定学校失败")
     finally:
         if cursor:
             cursor.close()
 
-
-@router.post(
-    "/teacher/update-review",
-    summary="教师更新审阅",
-    description="教师更新论文审阅内容，并可更新论文状态为已审阅、已通过或待更新"
+# ========== 绑定院系接口 ==========
+@router.put(
+    "/{user_id}/bind-department",
+    response_model=UserOut,
+    summary="绑定用户院系",
+    description="为指定用户绑定/更新所属院系信息（仅管理员可操作）"
 )
-def teacher_update_review(
-    payload: TeacherUpdateReviewRequest,
+def bind_department(
+    user_id: int,
+    payload: UserBindDepartment,
     db: pymysql.connections.Connection = Depends(get_db),
-    current_user: Optional[str] = Query('{"sub": 1, "username": "teacher1", "roles": ["teacher"]}', description="登录用户信息(JSON字符串，包含 sub/username/roles)，示例：{\"sub\":1,\"username\":\"teacher1\",\"roles\":[\"teacher\"]}"),
+    user_type: str = Query("admin", description="用户类型：student/teacher/admin"),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
 ):
-    current_user = _parse_current_user(current_user)
-    login_user_id = current_user.get("sub", 0)
-    login_user_roles = current_user.get("roles", [])
-    
-    if login_user_id <= 0:
-        raise HTTPException(status_code=401, detail="请先登录后再操作")
-    
-    if not ("teacher" in login_user_roles or "教师" in login_user_roles):
-        raise HTTPException(status_code=403, detail="无权限更新审阅：仅教师角色可操作")
-    
-    allowed_statuses = ["已审阅", "已通过", "待更新"]
-    if payload.status not in allowed_statuses:
-        raise HTTPException(status_code=400, detail=f"状态必须是以下之一：{', '.join(allowed_statuses)}")
+    # 1. 校验管理员权限
+    current_user_info = _parse_current_user(current_user)
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
     
     cursor = None
     try:
-        cursor = db.cursor()
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 2. 标准化用户类型 & 校验用户是否存在
+        user_type = _normalize_user_type(user_type)
+        table = USER_TABLES[user_type]["table"]
+        cursor.execute(f"SELECT id FROM {table} WHERE id = %s LIMIT 1", (user_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
         
-        cursor.execute("SELECT id, teacher_id FROM papers WHERE id = %s", (payload.paper_id,))
-        paper_row = cursor.fetchone()
-        if not paper_row:
-            raise HTTPException(status_code=404, detail=f"论文ID {payload.paper_id} 不存在")
+        # 3. 校验院系ID是否存在
+        if not _validate_department_exists(cursor, payload.department_id):
+            raise HTTPException(status_code=404, detail="院系不存在")
         
-        paper_db_id, paper_teacher_id = paper_row
-        if paper_teacher_id != 0 and paper_teacher_id != login_user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=f"无权限更新审阅：论文ID {payload.paper_id} 关联的教师ID为 {paper_teacher_id}，当前登录教师ID为 {login_user_id}"
-            )
+        # 4. 强制从数据库获取院系名称（不再使用传入的名称）
+        dept_name = _get_department_name_by_id(cursor, payload.department_id)
+        if not dept_name:
+            raise HTTPException(status_code=500, detail="无法获取院系名称")
         
-        old_content = None
-        now = datetime.now()
-        update_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 5. 构造更新语句（兼容教师表原有department字段）
+        update_fields = [
+            "department_id = %s",
+            "department_name = %s",
+            "updated_at = NOW()"
+        ]
+        update_params = [payload.department_id, dept_name]
         
-        cursor.execute("SELECT owner_id, latest_version, oss_key, size, detail FROM papers WHERE id = %s", (payload.paper_id,))
-        paper_info = cursor.fetchone()
-        student_id, version, oss_key, original_size, old_content = paper_info
+        # 兼容教师表的department字段（同步更新）
+        if user_type == "teacher":
+            update_fields.append("department = %s")
+            update_params.append(dept_name)
         
-        update_fields = ["status = %s", "operated_by = %s", "operated_time = %s", "updated_at = %s"]
-        update_params = [payload.status, current_user.get("username") or str(login_user_id), update_time_str, update_time_str]
+        update_params.append(user_id)
         
-        if payload.review_content is not None:
-            update_fields.append("detail = %s")
-            update_params.append(payload.review_content)
-        
-        update_params.append(payload.paper_id)
-        
+        # 6. 执行更新
         cursor.execute(
-            f"""
-            UPDATE papers
-            SET {', '.join(update_fields)}
-            WHERE id = %s
-            """,
-            tuple(update_params),
+            f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = %s",
+            tuple(update_params)
         )
-        
-        history_sql = """
-        INSERT INTO papers_history (
-            paper_id, version, size, status, detail, oss_key,
-            submitted_by_id, submitted_by_name, submitted_by_role,
-            operated_by, operated_time, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (payload.paper_id,))
-        origin_submit = cursor.fetchone()
-        submitter_name, submitter_role = origin_submit if origin_submit else ("", "")
-        cursor.execute(
-            history_sql,
-            (
-                payload.paper_id,
-                version,
-                original_size,
-                payload.status,
-                payload.review_content,
-                oss_key,
-                str(student_id),
-                submitter_name,
-                submitter_role,
-                current_user.get("username") or str(login_user_id),
-                update_time_str,
-                update_time_str,
-                update_time_str
-            )
-        )
-        
         db.commit()
         
-        return {
-            "message": "审阅更新成功",
-            "paper_id": payload.paper_id,
-            "teacher_id": login_user_id,
-            "status": payload.status,
-            "old_review_content": old_content,
-            "new_review_content": payload.review_content,
-            "updated_time": update_time_str
-        }
+        # 7. 查询更新后用户信息并返回
+        updated_user = _fetch_user(cursor, user_id, user_type)
+        if not updated_user:
+            raise HTTPException(status_code=500, detail="绑定院系后查询用户信息失败")
+        return UserOut(**updated_user)
     
+    except HTTPException:
+        raise
     except pymysql.MySQLError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"更新审阅失败：数据库操作错误 - {str(e)}")
+        logger.error(f"绑定院系数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="绑定院系失败")
     finally:
         if cursor:
             cursor.close()
