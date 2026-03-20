@@ -533,38 +533,37 @@ def user_bind_school(
     # 基础参数校验
     if sub <= 0:
         raise HTTPException(status_code=400, detail="无效的用户ID（必须为正整数）")
-    
+
     role = role.strip().lower()
     if role not in ["student", "teacher"]:
         raise HTTPException(status_code=400, detail="角色仅支持student/teacher")
-    
+
     # 解析current_user并校验一致性
     current_user_info = _parse_current_user(current_user)
     current_sub = current_user_info.get("sub", 0)
     current_roles = current_user_info.get("roles", [])
-    
+
     # 校验sub一致性
     if current_sub != sub:
         raise HTTPException(status_code=403, detail=f"current_user中的sub({current_sub})与传入的sub({sub})不匹配")
-    
+
     # 校验role一致性
     role_set = {r.strip().lower() for r in current_roles}
     if role not in role_set:
         raise HTTPException(status_code=403, detail=f"current_user中的角色({current_roles})与传入的role({role})不匹配")
-    
     # 业务逻辑处理
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         school_id = payload.school_id
-        
+
         # 验证学校存在性
         if not _validate_school_exists(cursor, school_id):
             raise HTTPException(status_code=404, detail=f"学校ID {school_id} 不存在")
-        
+
         # 获取学校名称
         school_name = _get_school_name_by_id(cursor, school_id) or payload.school_name
-        
+
         # 更新用户学校信息
         table = USER_TABLES[role]["table"]
         update_sql = f"""
@@ -573,10 +572,10 @@ def user_bind_school(
             WHERE id = %s
         """
         cursor.execute(update_sql, (school_id, school_name, sub))
-        
+
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"{role}用户ID {sub} 不存在")
-        
+
         db.commit()
         return {
             "code": 200,
@@ -614,45 +613,43 @@ def user_bind_department(
     # 基础参数校验
     if sub <= 0:
         raise HTTPException(status_code=400, detail="无效的用户ID（必须为正整数）")
-    
+
     role = role.strip().lower()
     if role not in ["student", "teacher"]:
         raise HTTPException(status_code=400, detail="角色仅支持student/teacher")
-    
+
     # 解析current_user并校验一致性
     current_user_info = _parse_current_user(current_user)
     current_sub = current_user_info.get("sub", 0)
     current_roles = current_user_info.get("roles", [])
-    
+
     # 校验sub一致性
     if current_sub != sub:
         raise HTTPException(status_code=403, detail=f"current_user中的sub({current_sub})与传入的sub({sub})不匹配")
-    
+
     # 校验role一致性
     role_set = {r.strip().lower() for r in current_roles}
     if role not in role_set:
         raise HTTPException(status_code=403, detail=f"current_user中的角色({current_roles})与传入的role({role})不匹配")
-    
     # 业务逻辑处理
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         department_id = payload.department_id
-        
+
         # 验证院系存在性
         if not _validate_department_exists(cursor, department_id):
             raise HTTPException(status_code=404, detail=f"院系ID {department_id} 不存在")
-        
+
         # 获取院系名称（自动填充）
         department_name = _get_department_name_by_id(cursor, department_id) or payload.department_name
-        
+
         # 检查用户是否已绑定学校
         table = USER_TABLES[role]["table"]
         cursor.execute(f"SELECT school_id FROM {table} WHERE id = %s", (sub,))
         user_school = cursor.fetchone()
         if not user_school or not user_school["school_id"]:
             raise HTTPException(status_code=400, detail="请先绑定学校信息，再绑定院系")
-        
         # 更新用户院系信息
         update_sql = f"""
             UPDATE {table} 
@@ -660,10 +657,10 @@ def user_bind_department(
             WHERE id = %s
         """
         cursor.execute(update_sql, (department_id, department_name, sub))
-        
+
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"{role}用户ID {sub} 不存在")
-        
+
         db.commit()
         return {
             "code": 200,
@@ -738,18 +735,11 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             raise HTTPException(status_code=400, detail="password 不能为空")
 
         # 账号映射逻辑：先查映射表
-        mapping = None
-        try:
-            cursor.execute(
-                "SELECT real_user_id, real_user_type FROM account_mapping WHERE virtual_account = %s",
-                (username,)
-            )
-            mapping = cursor.fetchone()
-        except pymysql.MySQLError as e:
-            if getattr(e, "args", [None])[0] == 1146:
-                logger.warning("account_mapping table missing, skip virtual account mapping")
-            else:
-                raise
+        cursor.execute(
+            "SELECT real_user_id, real_user_type FROM account_mapping WHERE virtual_account = %s",
+            (username,)
+        )
+        mapping = cursor.fetchone()
         if mapping:
             real_user_id = mapping["real_user_id"]
             real_user_type = mapping["real_user_type"]
@@ -2031,7 +2021,7 @@ def change_user_role(
         insert_fields = [
             new_id_col, "name", "phone", "email", "password", 
             "school_id", "school_name", "department_id", "department_name", 
-            "created_at", "updated_at"
+             "created_at", "updated_at"
         ]
         # 从原用户数据中取值，无则设为NULL
         insert_values = [

@@ -1686,11 +1686,11 @@ async def get_paper_detail(
     # 解析当前用户信息
     current_user = _parse_current_user(current_user)
     submitter_id = current_user.get("sub", 0)  
-    
+
     # 参数校验
     if not isinstance(paper_id, int) or paper_id <= 0:
         raise HTTPException(status_code=400, detail="paper_id必须是正整数")
-    
+
     # 未登录校验
     if submitter_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录后再查看论文信息")
@@ -1698,7 +1698,6 @@ async def get_paper_detail(
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        
         # 仅查询指定字段（严格匹配你要求的列表）
         paper_sql = """
         SELECT 
@@ -1710,11 +1709,11 @@ async def get_paper_detail(
         """
         cursor.execute(paper_sql, (paper_id,))
         paper_detail = cursor.fetchone()
-        
+
         # 校验论文是否存在
         if not paper_detail:
             raise HTTPException(status_code=404, detail=f"论文ID {paper_id} 不存在")
-        
+
         # 权限校验：仅论文归属学生或关联老师可访问
         paper_owner_id = paper_detail["owner_id"]
         paper_teacher_id = paper_detail["teacher_id"]
@@ -1723,9 +1722,9 @@ async def get_paper_detail(
                 status_code=403,
                 detail=f"无权限查看：仅论文归属者（ID={paper_owner_id}）或关联老师（ID={paper_teacher_id}）可查看该论文信息"
             )
-        
+
         return paper_detail
-        
+
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"数据库操作失败: {str(e)}")
     finally:

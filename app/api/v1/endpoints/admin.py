@@ -258,7 +258,7 @@ def dashboard_stats(
         cursor = db.cursor()
         # 聚合论文数据：按学院分组统计论文数量
         stats_sql = """
-        SELECT p.owner_id, CASE WHEN t.id IS NOT NULL THEN COALESCE(t.department, '未知院系') WHEN s.id IS NOT NULL THEN COALESCE(s.grade, '未知年级') ELSE '未知' END AS college
+        SELECT p.owner_id, CASE WHEN t.id IS NOT NULL THEN COALESCE(t.department_name, '未知院系') WHEN s.id IS NOT NULL THEN COALESCE(s.department_name, '未知院系') ELSE '未知' END AS college
         FROM papers p
         LEFT JOIN students s ON p.owner_id = s.id
         LEFT JOIN teachers t ON p.owner_id = t.id;
