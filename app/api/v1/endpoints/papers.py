@@ -967,7 +967,6 @@ def get_paper_review(
             cursor.close()
 
 
-
 @router.get(
     "/{paper_id}/versions",
     response_model=List[VersionOut],
@@ -1283,10 +1282,17 @@ def create_ddl(
         cursor.execute("SELECT member_id, member_type FROM group_members WHERE group_id = %s AND is_active = 1", (group_id,))
         members = cursor.fetchall()
         
-        # 检查群组是否已经有DDL（在ddl_management表中查找）
-        cursor.execute("SELECT ddlid FROM ddl_management WHERE group_id = %s", (group_id,))
-        if cursor.fetchone():
-            raise HTTPException(status_code=400, detail="已有DDL存在，无法创建新的DDL")
+        # 检查群组是否已经有DDL
+        if members:
+            # 获取群组第一个成员的ID
+            first_member_id = members[0][0]
+            # 检查该成员是否有任何DDL消息（无论是否已读）
+            cursor.execute(
+                "SELECT id FROM user_messages WHERE user_id = %s AND source = 'ddl'", 
+                (str(first_member_id),)
+            )
+            if cursor.fetchone():
+                raise HTTPException(status_code=400, detail="已有DDL存在，无法创建新的DDL")
         
         # 创建DDL记录
         create_sql = """
@@ -1795,7 +1801,6 @@ async def get_paper_detail(
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
-
         # 仅查询指定字段（严格匹配你要求的列表）
         paper_sql = """
         SELECT 
