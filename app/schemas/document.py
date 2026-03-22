@@ -47,6 +47,7 @@ class MaterialResponse(BaseModel):
     content_type: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+    paper_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

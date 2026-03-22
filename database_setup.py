@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS `file_records` (
     `storage_path` VARCHAR(500) NOT NULL COMMENT '文件存储地址',
     `file_type` ENUM('document', 'essay') NOT NULL DEFAULT 'document' COMMENT '文件类型：document(文档)或essay(文章)',
     `version` INT NOT NULL DEFAULT 1 COMMENT '版本号',
+    `paper_id` INT DEFAULT NULL COMMENT '关联的论文ID',
     `remark` TEXT COMMENT '备注',
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
@@ -193,7 +194,8 @@ CREATE TABLE IF NOT EXISTS `file_records` (
     KEY `idx_uploader_id` (`uploader_id`),
     KEY `idx_filename` (`filename`),
     KEY `idx_upload_time` (`upload_time`),
-    KEY `idx_file_type` (`file_type`)
+    KEY `idx_file_type` (`file_type`),
+    KEY `idx_paper_id` (`paper_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文件记录表';
 """
 
@@ -540,6 +542,7 @@ TABLE_COLUMN_DEFINITIONS = {
         "storage_path": "`storage_path` VARCHAR(500) NOT NULL COMMENT '文件存储地址'",
         "file_type": "`file_type` ENUM('document', 'essay') NOT NULL DEFAULT 'document' COMMENT '文件类型：document(文档)或essay(文章)'",
         "version": "`version` INT NOT NULL DEFAULT 1 COMMENT '版本号'",
+        "paper_id": "`paper_id` INT DEFAULT NULL COMMENT '关联的论文ID'",
         "remark": "`remark` TEXT COMMENT '备注'",
         "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
@@ -715,7 +718,8 @@ TABLE_INDEX_DEFINITIONS = {
         "CREATE INDEX idx_uploader_id ON `file_records` (uploader_id)",
         "CREATE INDEX idx_filename ON `file_records` (filename)",
         "CREATE INDEX idx_upload_time ON `file_records` (upload_time)",
-        "CREATE INDEX idx_file_type ON `file_records` (file_type)"
+        "CREATE INDEX idx_file_type ON `file_records` (file_type)",
+        "CREATE INDEX idx_paper_id ON `file_records` (paper_id)"
     ],
     "groups": [
         "CREATE UNIQUE INDEX uniq_group_id ON `groups` (group_id)",

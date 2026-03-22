@@ -44,6 +44,7 @@ def _parse_current_user(current_user: Optional[str]) -> dict:
 async def upload_material(
     file: UploadFile = File(...),  
     name: str = Query(..., description="username"),
+    paper_id: int = Query(..., description="关联的论文ID"),
     file_type: str = Query(
         "document", 
         description="文件类型，可选值：document(文档)、essay(文章)",
@@ -70,6 +71,16 @@ async def upload_material(
             status_code=403, 
             detail=f"无权限上传：登录用户名[{login_username}]与传入的username[{name}]不一致"
         )
+    # 验证 paper_id 是否存在于 papers 表中
+    cursor = None
+    try:
+        cursor = db.cursor()
+        cursor.execute("SELECT id FROM papers WHERE id = %s", (paper_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"指定的论文ID {paper_id} 不存在")
+    finally:
+        if cursor:
+            cursor.close()
     # 读取文件内容
     try:
         content = await file.read()
@@ -86,9 +97,9 @@ async def upload_material(
         insert_sql = """
             INSERT INTO file_records (
                 name, filename, upload_time, storage_path, 
-                file_type, version, remark, created_at, updated_at
+                file_type, version, paper_id, remark, created_at, updated_at
             )
-            VALUES (%s, %s, NOW(), %s, %s, %s, %s, NOW(), NOW())
+            VALUES (%s, %s, NOW(), %s, %s, %s, %s, %s, NOW(), NOW())
         """
         storage_path = upload_attachment_to_storage(file.filename, content)
         # 执行插入
@@ -100,6 +111,7 @@ async def upload_material(
                 storage_path,
                 file_type,
                 version,
+                paper_id,
                 remark,          
             )
         )
@@ -111,7 +123,7 @@ async def upload_material(
         select_sql = """
             SELECT 
                 id, name, filename, upload_time, storage_path, 
-                file_type, version, remark, created_at, updated_at 
+                file_type, version, paper_id, remark, created_at, updated_at 
             FROM file_records 
             WHERE id = %s
         """
@@ -146,6 +158,7 @@ async def update_material(
     material_id: int,
     file: UploadFile = File(...),
     name: str = Query(..., description="username"),
+    paper_id: int = Query(None, description="关联的论文ID"),
     file_type: str = Query(None, description="文件类型：document(文档)或essay(文章)", enum=["document", "essay"]),
     version: int = Query(None, description="版本号", ge=1),
     remark: str = Query(None, description="备注"),
@@ -169,6 +182,17 @@ async def update_material(
             status_code=403, 
             detail=f"无权限更新：登录用户名[{login_username}]与传入的username[{name}]不一致"
         )
+    # 验证 paper_id 是否存在于 papers 表中（如果提供了的话）
+    if paper_id is not None:
+        cursor = None
+        try:
+            cursor = db.cursor()
+            cursor.execute("SELECT id FROM papers WHERE id = %s", (paper_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail=f"指定的论文ID {paper_id} 不存在")
+        finally:
+            if cursor:
+                cursor.close()
     # 读取文件内容
     try:
         content = await file.read()
@@ -211,6 +235,9 @@ async def update_material(
         if version is not None:
             update_fields.append("version = %s")
             update_params.append(version)
+        if paper_id is not None:
+            update_fields.append("paper_id = %s")
+            update_params.append(paper_id)
         # 最后更新updated_at字段
         update_fields.append("updated_at = NOW()")
         # 拼接更新SQL
@@ -229,7 +256,7 @@ async def update_material(
             """
             SELECT 
                 id, name, filename, upload_time, storage_path, 
-                file_type, version, remark, created_at, updated_at 
+                file_type, version, paper_id, remark, created_at, updated_at 
             FROM file_records WHERE id = %s
             """,
             (material_id,),
@@ -319,10 +346,10 @@ def delete_material(
 @router.get(
     "/names",
     summary="获取材料名称列表",
-    description="列出指定存储路径下的材料文件名（非递归）"
+    description="通过论文ID查询与该论文绑定的所有材料"
 )
 def list_material_names(
-    name: str = Query(None, description="按上传者姓名筛选"),
+    paper_id: int = Query(..., description="论文ID，用于筛选与该论文绑定的材料"),
     file_type: str = Query(None, description="按文件类型筛选：document/essay", enum=["document", "essay"]),
     keyword: str = Query(None, description="按文件名关键词模糊筛选"),
     db: pymysql.connections.Connection = Depends(get_db)
@@ -332,15 +359,12 @@ def list_material_names(
         cursor = db.cursor(pymysql.cursors.DictCursor)
         # 构建基础查询SQL
         query_sql = """
-            SELECT id, name, filename, file_type, upload_time, version, storage_path 
+            SELECT id, name, filename, file_type, upload_time, version, paper_id, storage_path 
             FROM file_records 
-            WHERE 1=1
+            WHERE paper_id = %s
         """
-        query_params = []
+        query_params = [paper_id]
         # 动态添加筛选条件
-        if name:
-            query_sql += " AND name LIKE %s"
-            query_params.append(f"%{name}%")  # 姓名模糊匹配
         if file_type:
             query_sql += " AND file_type = %s"
             query_params.append(file_type)  # 文件类型精准匹配
@@ -361,6 +385,7 @@ def list_material_names(
                 "file_type": record["file_type"],
                 "upload_time": record["upload_time"],
                 "version": record["version"],
+                "paper_id": record.get("paper_id"),
                 "storage_path": record["storage_path"]  # 新增返回存储路径
             }
             for record in records
@@ -368,7 +393,7 @@ def list_material_names(
         return {
             "total": len(file_list),
             "filter_conditions": {
-                "uploader_name": name,
+                "paper_id": paper_id,
                 "file_type": file_type,
                 "filename_keyword": keyword
             },
