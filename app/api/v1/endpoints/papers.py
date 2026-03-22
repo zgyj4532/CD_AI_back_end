@@ -9,7 +9,6 @@ import sys
 import shutil
 import subprocess
 import tempfile
-from app.core.dependencies import get_current_user
 from app.schemas.document import (
     PaperOut,
     PaperStatusOut,
@@ -503,7 +502,7 @@ def create_paper_status(
             submitted_by_id, submitted_by_name, submitted_by_role,
             operated_by, operated_time, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (paper_id,))
         origin_submit = cursor.fetchone()
@@ -626,7 +625,7 @@ def update_paper_status(
         if current_status == "已定稿":
             raise HTTPException(
                 status_code=403,
-                detail=f"论文最近有效状态为【已定稿】，不允许修改任何状态"
+                detail="论文最近有效状态为【已定稿】，不允许修改任何状态"
             )
         if status not in allowed_target_status:
             role_name = "学生" if is_student else "老师"
@@ -659,7 +658,7 @@ def update_paper_status(
             submitted_by_id, submitted_by_name, submitted_by_role,
             operated_by, operated_time, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (paper_id,))
         origin_submit = cursor.fetchone()
@@ -1283,27 +1282,20 @@ def create_ddl(
         cursor.execute("SELECT member_id, member_type FROM group_members WHERE group_id = %s AND is_active = 1", (group_id,))
         members = cursor.fetchall()
         
-        # 检查群组是否已经有DDL
-        if members:
-            # 获取群组第一个成员的ID
-            first_member_id = members[0][0]
-            # 检查该成员是否有任何DDL消息（无论是否已读）
-            cursor.execute(
-                "SELECT id FROM user_messages WHERE user_id = %s AND source = 'ddl'", 
-                (str(first_member_id),)
-            )
-            if cursor.fetchone():
-                raise HTTPException(status_code=400, detail="已有DDL存在，无法创建新的DDL")
+        # 检查群组是否已经有DDL（在ddl_management表中查找）
+        cursor.execute("SELECT ddlid FROM ddl_management WHERE group_id = %s", (group_id,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="已有DDL存在，无法创建新的DDL")
         
         # 创建DDL记录
         create_sql = """
-        INSERT INTO ddl_management (teacher_id, teacher_name, ddl_time, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO ddl_management (teacher_id, teacher_name, group_id, ddl_time, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """
         create_time = now.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute(
             create_sql, 
-            (teacher_id, teacher_name, ddl_time, create_time, create_time)
+            (teacher_id, teacher_name, group_id, ddl_time, create_time, create_time)
         )
         ddlid = cursor.lastrowid
         
@@ -1315,12 +1307,13 @@ def create_ddl(
             
             # 插入消息记录
             message_sql = """
-            INSERT INTO user_messages (user_id, username, title, content, source, status, received_time, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO user_messages (user_id, username, title, content, source, status, received_time, created_at, updated_at, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
+            metadata = json.dumps({"ddlid": ddlid, "group_id": group_id, "group_name": group_name})
             cursor.execute(
                 message_sql, 
-                (str(member_id), f"{member_type}_{member_id}", message_title, message_content, "ddl", "unread", create_time, create_time, create_time)
+                (str(member_id), f"{member_type}_{member_id}", message_title, message_content, "ddl", "unread", create_time, create_time, create_time, metadata)
             )
         
         db.commit()
@@ -1385,7 +1378,6 @@ def list_ddl(
             # 处理datetime对象转字符串
             ddl_time_str = record["ddl_time"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["ddl_time"], datetime) else record["ddl_time"]
             created_at_str = record["created_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["created_at"], datetime) else record["created_at"]
-            updated_at_str = record["updated_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["updated_at"], datetime) else record["updated_at"]
             
             result.append(DDLOut(
                 ddlid=record["ddlid"],
@@ -1523,7 +1515,7 @@ def cleanup_expired_ddl(
                 # 提交事务
                 db.commit()
                 
-            except Exception as e:
+            except Exception:
                 # 回滚事务
                 if db:
                     db.rollback()
@@ -1586,17 +1578,55 @@ def delete_ddl(
                 status_code=403,
                 detail=f"无权限删除：仅创建该DDL的教师（ID={ddl_teacher_id}）或管理员可删除，当前登录用户ID={login_user_id}"
             )
+        
+        # 获取group_id和ddl_time用于匹配消息
+        group_id = None
+        ddl_time_str = None
+        try:
+            cursor.execute("SELECT group_id, ddl_time FROM ddl_management WHERE ddlid = %s", (ddlid,))
+            row = cursor.fetchone()
+            if row:
+                group_id = row[0]
+                ddl_time = row[1]
+                if ddl_time:
+                    ddl_time_str = ddl_time.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
+        
         # 删除操作
+        # 先删除相关的消息记录
+        deleted_messages_count = 0
+        
+        # 方式1：通过metadata中的ddlid匹配
+        if ddlid:
+            delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND metadata LIKE %s"
+            cursor.execute(delete_messages_sql, (f'%\"ddlid\": {ddlid}%',))
+            deleted_messages_count = cursor.rowcount
+        
+        # 方式2：如果metadata方式没找到，通过group_id匹配
+        if deleted_messages_count == 0 and group_id:
+            delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND metadata LIKE %s"
+            cursor.execute(delete_messages_sql, (f'%\"group_id\": {group_id}%',))
+            deleted_messages_count = cursor.rowcount
+        
+        # 方式3：如果metadata方式没找到，尝试通过消息内容匹配
+        if deleted_messages_count == 0 and ddl_time_str:
+            delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND content LIKE %s"
+            cursor.execute(delete_messages_sql, (f'%{ddl_time_str}%',))
+            deleted_messages_count = cursor.rowcount
+        
+        # 再删除DDL记录
         delete_sql = "DELETE FROM ddl_management WHERE ddlid = %s"
         cursor.execute(delete_sql, (ddlid,))
         db.commit()
         
         return {
             "message": f"DDL {ddlid} 删除成功",
-            "ddlid": ddlid,
-            "deleted_by": login_user_id,
-            "deleted_by_role": login_user_roles,
-            "deleted_teacher_info": {"teacher_id": ddl_teacher_id, "teacher_name": ddl_teacher_name}
+            "ddlid": str(ddlid),
+            "deleted_messages_count": str(deleted_messages_count),
+            "deleted_by": str(login_user_id),
+            "deleted_by_role": ",".join(login_user_roles) if login_user_roles else "",
+            "deleted_teacher_info": f"教师ID:{ddl_teacher_id},教师姓名:{ddl_teacher_name}"
         }
     except pymysql.MySQLError as e:
         if db:
@@ -1736,3 +1766,64 @@ def update_ddl(
                 cursor.close()
             except Exception:
                 pass
+
+
+@router.get(
+    "/{paper_id}",
+    response_model=Dict,
+    summary="查看论文所有信息",
+    description="输入论文ID查询指定字段信息，仅论文归属学生或关联老师可访问"
+)
+async def get_paper_detail(
+    paper_id: int,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="提交者信息(JSON字符串，包含 sub/username/roles)"),
+):
+    # 解析当前用户信息
+    current_user = _parse_current_user(current_user)
+    submitter_id = current_user.get("sub", 0)  
+
+    # 参数校验
+    if not isinstance(paper_id, int) or paper_id <= 0:
+        raise HTTPException(status_code=400, detail="paper_id必须是正整数")
+
+    # 未登录校验
+    if submitter_id <= 0:
+        raise HTTPException(status_code=401, detail="请先登录后再查看论文信息")
+
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        # 仅查询指定字段
+        paper_sql = """
+        SELECT 
+            id, owner_id, teacher_id, version, size, status, detail, 
+            DATE_FORMAT(ddl, '%%Y-%%m-%%d %%H:%%i:%%s') as ddl,
+            oss_key, pdf_oss_key,
+            DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at  -- 新增更新时间字段，格式化输出
+        FROM papers 
+        WHERE id = %s
+        """
+        cursor.execute(paper_sql, (paper_id,))
+        paper_detail = cursor.fetchone()
+
+        # 校验论文是否存在
+        if not paper_detail:
+            raise HTTPException(status_code=404, detail=f"论文ID {paper_id} 不存在")
+
+        # 权限校验：仅论文归属学生或关联老师可访问
+        paper_owner_id = paper_detail["owner_id"]
+        paper_teacher_id = paper_detail["teacher_id"]
+        if submitter_id not in [paper_owner_id, paper_teacher_id]:
+            raise HTTPException(
+                status_code=403,
+                detail=f"无权限查看：仅论文归属者（ID={paper_owner_id}）或关联老师（ID={paper_teacher_id}）可查看该论文信息"
+            )
+
+        return paper_detail
+
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库操作失败: {str(e)}")
+    finally:
+        if cursor:
+            cursor.close()

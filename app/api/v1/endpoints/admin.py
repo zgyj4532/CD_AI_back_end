@@ -1,12 +1,13 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
-from app.core.dependencies import get_current_user
 from app.services.oss import upload_file_to_oss
 import pymysql
 from datetime import datetime
 from app.database import get_db
 import uuid
+import json
+from app.middleware.operation_logger import record_operation_log
 
 router = APIRouter()
 
@@ -257,7 +258,7 @@ def dashboard_stats(
         cursor = db.cursor()
         # 聚合论文数据：按学院分组统计论文数量
         stats_sql = """
-        SELECT p.owner_id, CASE WHEN t.id IS NOT NULL THEN COALESCE(t.department, '未知院系') WHEN s.id IS NOT NULL THEN COALESCE(s.grade, '未知年级') ELSE '未知' END AS college
+        SELECT p.owner_id, CASE WHEN t.id IS NOT NULL THEN COALESCE(t.department_name, '未知院系') WHEN s.id IS NOT NULL THEN COALESCE(s.department_name, '未知院系') ELSE '未知' END AS college
         FROM papers p
         LEFT JOIN students s ON p.owner_id = s.id
         LEFT JOIN teachers t ON p.owner_id = t.id;
@@ -531,3 +532,73 @@ def calculate_total_updated_papers(
     finally:
         if cursor:
             cursor.close()
+
+
+@router.post(
+    "/audit/logs/record",
+    summary="记录操作日志",
+    description="记录操作日志到数据库"
+)
+async def record_log(
+    request: Request,
+    user=Depends(admin_only),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
+    """记录操作日志到数据库"""
+    try:
+        # 获取请求信息
+        method = request.method
+        path = request.url.path
+        client_ip = request.client.host if request.client else 'Unknown'
+        
+        # 获取用户信息
+        user_id = str(user.get("id", ""))
+        username = user.get("username", "")
+        
+        # 获取请求参数
+        try:
+            if request.method in ["POST", "PUT", "PATCH"]:
+                body = await request.body()
+                try:
+                    params = json.loads(body.decode())
+                except Exception:
+                    params = str(body.decode())
+            else:
+                params = dict(request.query_params)
+        except Exception:
+            params = {}
+        
+        # 记录操作日志
+        record_operation_log(
+            user_id=user_id,
+            username=username,
+            operation_type=method,
+            operation_path=path,
+            operation_params=params,
+            ip_address=client_ip,
+            status="success"
+        )
+        
+        return {
+            "message": "操作日志记录成功",
+            "code": 200
+        }
+    except Exception as e:
+        # 记录失败日志
+        try:
+            client_ip = request.client.host if request.client else 'Unknown'
+            record_operation_log(
+                user_id=str(user.get("id", "")) if user else "",
+                username=user.get("username", "") if user else "",
+                operation_type=request.method,
+                operation_path=request.url.path,
+                operation_params={},
+                ip_address=client_ip,
+                status="failure"
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"记录操作日志失败：{str(e)}"
+        )

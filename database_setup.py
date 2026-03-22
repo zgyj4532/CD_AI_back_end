@@ -335,12 +335,14 @@ CREATE TABLE IF NOT EXISTS `ddl_management` (
     ddlid INT PRIMARY KEY AUTO_INCREMENT COMMENT 'DDL唯一ID',
     teacher_id INT NOT NULL COMMENT '教师ID）',
     teacher_name VARCHAR(50) NOT NULL COMMENT '教师姓名', 
+    group_id INT NOT NULL COMMENT '群组ID',
     ddl_time DATETIME NOT NULL COMMENT '截止时间（精确到秒）',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     INDEX idx_teacher_id (teacher_id),
     INDEX idx_ddl_time (ddl_time),
-    INDEX idx_teacher_name (teacher_name) 
+    INDEX idx_teacher_name (teacher_name),
+    INDEX idx_group_id (group_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='论文DDL截止时间管理表';
 """
 
@@ -669,19 +671,6 @@ TABLE_COLUMN_DEFINITIONS = {
         "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
         "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'success' COMMENT '操作状态（success/failure）'",
-    },
-    "user_messages": {
-        "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '消息ID'",
-        "user_id": "`user_id` VARCHAR(64) NOT NULL COMMENT '接收用户ID'",
-        "username": "`username` VARCHAR(64) DEFAULT NULL COMMENT '接收用户名'",
-        "title": "`title` VARCHAR(255) NOT NULL COMMENT '消息标题'",
-        "content": "`content` TEXT NOT NULL COMMENT '消息内容'",
-        "source": "`source` VARCHAR(64) DEFAULT NULL COMMENT '来源（系统/业务模块）'",
-        "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'unread' COMMENT '状态（unread/read）'",
-        "received_time": "`received_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '接收时间'",
-        "metadata": "`metadata` JSON DEFAULT NULL COMMENT '扩展元数据'",
-        "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
-        "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
     },
 }
 

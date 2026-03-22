@@ -7,8 +7,83 @@ from app.services.oss import upload_attachment_to_storage
 import json
 from datetime import datetime
 from typing import Optional
+import os
+import sys
+import tempfile
+import shutil
+import subprocess
+try:
+    from docx2pdf import convert as docx2pdf_convert
+except ImportError:
+    docx2pdf_convert = None
 
 router = APIRouter()
+
+def _find_soffice_binary() -> Optional[str]:
+    for cmd in ("soffice", "libreoffice"):
+        path = shutil.which(cmd)
+        if path:
+            return path
+    return None
+
+def convert_docx_to_pdf(docx_content: bytes, filename: str) -> tuple:
+    pdf_filename = os.path.splitext(filename)[0] + '.pdf'
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = os.path.join(tmpdir, os.path.basename(filename) or "input.docx")
+            with open(docx_path, "wb") as temp_docx:
+                temp_docx.write(docx_content)
+
+            if sys.platform.startswith("linux"):
+                soffice_bin = _find_soffice_binary()
+                if not soffice_bin:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="DOCX转PDF失败：未找到LibreOffice（soffice/libreoffice）。请在Linux上安装LibreOffice后重试"
+                    )
+                cmd = [
+                    soffice_bin,
+                    "--headless",
+                    "--nologo",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    tmpdir,
+                    docx_path,
+                ]
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if proc.returncode != 0:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"DOCX转PDF失败：LibreOffice 执行错误（code={proc.returncode}，stderr={proc.stderr.decode(errors='ignore').strip()[:400]} )"
+                    )
+                pdf_path = os.path.join(tmpdir, pdf_filename)
+            else:
+                if not docx2pdf_convert:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="DOCX转PDF失败：docx2pdf 未安装或不可用，请安装 docx2pdf 并确保本机有可用的 Word/LibreOffice"
+                    )
+                docx2pdf_convert(docx_path, tmpdir)
+                pdf_path = os.path.join(tmpdir, pdf_filename)
+
+            if not os.path.exists(pdf_path):
+                raise HTTPException(
+                    status_code=500,
+                    detail="DOCX转PDF失败：未生成PDF文件，请检查转换工具安装情况"
+                )
+
+            with open(pdf_path, 'rb') as f:
+                pdf_content = f.read()
+
+        return pdf_content, pdf_filename
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+             detail=f"DOCX转PDF失败：{str(e)}。请确保已安装转换工具（Linux推荐安装LibreOffice）"
+        )
 
 def _parse_current_user(current_user: Optional[str]) -> dict:
     try:
@@ -77,12 +152,31 @@ async def upload_material(
             raise HTTPException(status_code=400, detail="上传的文件内容不能为空")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"读取文件失败：{str(e)}")
+    
+    # 处理docx文件自动转换为pdf（仅上传pdf，不上传原docx）
+    storage_path = ""
+    original_filename = file.filename
+    is_docx = original_filename.lower().endswith(".docx")
+    
+    try:
+        if is_docx:
+            # 如果是docx文件，转换为pdf并只上传pdf
+            pdf_content, pdf_filename = convert_docx_to_pdf(content, original_filename)
+            storage_path = upload_attachment_to_storage(pdf_filename, pdf_content)
+            # 更新文件名记录为pdf文件名
+            original_filename = pdf_filename
+        else:
+            # 非docx文件直接上传原文件
+            storage_path = upload_attachment_to_storage(original_filename, content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"文件存储/转换失败：{str(e)}")
+    
     # 数据库操作
     cursor = None
     try:
         # 创建游标
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        # 插入SQL
+        # 插入SQL（保持原有字段不变）
         insert_sql = """
             INSERT INTO file_records (
                 name, filename, upload_time, storage_path, 
@@ -90,14 +184,13 @@ async def upload_material(
             )
             VALUES (%s, %s, NOW(), %s, %s, %s, %s, NOW(), NOW())
         """
-        storage_path = upload_attachment_to_storage(file.filename, content)
         # 执行插入
         cursor.execute(
             insert_sql,
             (
                 name,
-                file.filename,
-                storage_path,
+                original_filename,  # docx时记录为pdf文件名，非docx记录原文件名
+                storage_path,       # docx时存储pdf路径，非docx存储原文件路径
                 file_type,
                 version,
                 remark,          
@@ -121,7 +214,8 @@ async def upload_material(
             raise HTTPException(status_code=500, detail="文件上传成功，但查询不到新增记录")
         # 将上传文件的 content_type 加入返回记录
         try:
-            new_record["content_type"] = file.content_type
+            # docx转换后content_type改为pdf的类型
+            new_record["content_type"] = "application/pdf" if is_docx else file.content_type
         except Exception:
             new_record["content_type"] = None
         # 返回结果
