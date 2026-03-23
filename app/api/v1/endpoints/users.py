@@ -1355,7 +1355,7 @@ def delete_user(
 @router.post(
     "/import",
     summary="一键导入用户",
-    description="上传 CSV/TSV 文件批量导入用户（列：username,user_type,email,full_name,role,password 可选）"
+    description="上传 CSV/TSV 文件批量导入用户（列：username,user_type,full_name,role,password 可选）"
 )
 async def import_users(file: UploadFile = File(...), db: pymysql.connections.Connection = Depends(get_db)):
     filename = file.filename or ""
@@ -1397,7 +1397,7 @@ async def import_users(file: UploadFile = File(...), db: pymysql.connections.Con
             info = USER_TABLES[user_type]
             table = info["table"]
             phone = (row.get("phone") or None) and row.get("phone").strip()
-            email = (row.get("email") or None) and row.get("email").strip()
+            email = "string"
             full_name = (row.get("full_name") or None) and row.get("full_name").strip()
             role = (row.get("role") or default_role).strip() or default_role
             password = (row.get("password") or default_password).strip() or default_password
