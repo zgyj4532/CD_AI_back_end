@@ -3,6 +3,13 @@ FastAPI 应用主入口：集中创建应用实例、配置中间件与路由。
 """
 
 from datetime import datetime
+import warnings
+
+warnings.filterwarnings(
+	"ignore",
+	message=r"Valid config keys have changed in V2:\s*\* 'from_attributes' has been renamed to 'from_attributes'",
+	module=r"pydantic\._internal\._config",
+)
 
 # import app.utils.logger as logger_config
 
