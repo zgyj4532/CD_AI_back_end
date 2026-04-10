@@ -750,6 +750,7 @@ def get_received_notifications(
                         sender_name = teacher_row[0]
             
             items.append({
+                "message_id": row[0],
                 "title": row[3],
                 "content": row[4],
                 "operation_time": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else None,

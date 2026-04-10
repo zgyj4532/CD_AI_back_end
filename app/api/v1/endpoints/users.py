@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Body
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import csv
 import io
 import pymysql
@@ -19,10 +20,11 @@ from app.schemas.user import (
     LoginResponse,
 )
 from app.database import get_db
-from app.core.dependencies import get_current_user
-from app.core.security import create_access_token, get_password_hash, verify_password
+from app.core.security import create_access_token, get_password_hash, verify_password, decode_access_token
 from loguru import logger
 import pandas as pd
+
+security = HTTPBearer()
 
 
 def _parse_current_user(current_user: Optional[str]) -> dict:
@@ -124,7 +126,7 @@ def _fetch_user_for_login(
     if user_type == "admin":
         cursor.execute(
             f"""
-            SELECT id, {id_col} as username, name as full_name, phone, email, role,
+            SELECT id, {id_col} as username, {id_col} as user_specific_id, name as full_name, phone, email, role,
                    password,
                    DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                    DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
@@ -135,7 +137,7 @@ def _fetch_user_for_login(
     else:
         cursor.execute(
             f"""
-            SELECT id, {id_col} as username, name as full_name, phone, email,
+            SELECT id, {id_col} as username, {id_col} as user_specific_id, name as full_name, phone, email,
                    password,
                    DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                    DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
@@ -691,15 +693,54 @@ def user_bind_department(
     description="根据当前登录用户信息返回用户表中的全部字段（不包含密码）",
 )
 def get_current_user_info(
-    current_user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db: pymysql.connections.Connection = Depends(get_db),
 ):
     cursor = None
     try:
-        user_id = current_user.get("sub")
+        token = credentials.credentials
+        payload = decode_access_token(token)
+        
+        if payload is None:
+            raise HTTPException(
+                status_code=401,
+                detail="无效的认证凭据",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 验证会话是否活跃
+        user_id = payload.get("sub")
         if not user_id:
-            raise HTTPException(status_code=401, detail="请先登录")
-        user_type = _resolve_user_type_from_payload(current_user)
+            raise HTTPException(
+                status_code=401,
+                detail="无效的用户ID",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_type = payload.get("user_type")
+        
+        # 检查会话是否存在且活跃
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT is_active FROM user_sessions WHERE token = %s AND user_id = %s AND user_type = %s",
+            (token, user_id, user_type)
+        )
+        session = cursor.fetchone()
+        
+        if not session or not session[0]:
+            raise HTTPException(
+                status_code=401,
+                detail="该账号已在别处登录，若非本人操作，请及时修改密码",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 更新最后活动时间
+        cursor.execute(
+            "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE token = %s",
+            (token,)
+        )
+        
+        # 获取用户信息
+        user_type = _resolve_user_type_from_payload(payload)
         info = USER_TABLES[user_type]
         table = info["table"]
         cursor = db.cursor(pymysql.cursors.DictCursor)
@@ -712,8 +753,139 @@ def get_current_user_info(
     except HTTPException:
         raise
     except pymysql.MySQLError as e:
+        db.rollback()
         logger.error(f"获取用户信息数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="获取用户信息失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.get(
+    "/check-session",
+    summary="检查用户会话状态",
+    description="检查用户会话是否活跃，用于实现单点登录功能"
+)
+def check_session(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    """
+    检查用户会话状态，用于实现单点登录功能
+    
+    - 验证 JWT 令牌的有效性
+    - 检查会话是否存在且活跃
+    - 如果会话不存在或不活跃，返回 401 错误
+    """
+    cursor = None
+    try:
+        token = credentials.credentials
+        payload = decode_access_token(token)
+        
+        if payload is None:
+            raise HTTPException(
+                status_code=401,
+                detail="无效的认证凭据",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 验证会话是否活跃
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="无效的用户ID",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_type = payload.get("user_type")
+        
+        # 检查会话是否存在且活跃（使用时间复杂度最小的方式：直接通过token、user_id、user_type查询）
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT is_active FROM user_sessions WHERE token = %s AND user_id = %s AND user_type = %s",
+            (token, user_id, user_type)
+        )
+        session = cursor.fetchone()
+        
+        if not session or not session[0]:
+            # 会话不存在或不活跃（被顶号）
+            raise HTTPException(
+                status_code=401,
+                detail="账号已在别处登录，若非本人操作，请及时更改密码",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 会话活跃，更新最后活动时间
+        cursor.execute(
+            "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE token = %s",
+            (token,)
+        )
+        db.commit()
+        
+        return {
+            "status": "active",
+            "message": "会话活跃",
+            "user_id": user_id,
+            "user_type": user_type
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"检查会话状态数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="检查会话状态失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.post(
+    "/clear-expired-sessions",
+    summary="清除过期会话",
+    description="清除指定用户的过期会话（is_active=0且创建时间超过2小时）"
+)
+def clear_expired_sessions(
+    user_id: str = Query(..., description="用户专门的ID，如student_id、teacher_id、admin_id"),
+    user_type: str = Query(..., description="用户类型（student/teacher/admin）"),
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    """
+    清除指定用户的过期会话
+    
+    - 只删除创建时间超过2小时的过期会话（is_active=0）
+    - 保留近期的过期会话，用于顶号判断
+    - 用于登录时清理旧的过期会话，避免数据库膨胀
+    - user_id参数为用户专门的ID，如student_id、teacher_id、admin_id
+    """
+    cursor = None
+    try:
+        cursor = db.cursor()
+        
+        # 只删除创建时间超过2小时的过期会话
+        cursor.execute(
+            """
+            DELETE FROM user_sessions 
+            WHERE user_id = %s 
+            AND user_type = %s 
+            AND is_active = 0 
+            AND created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR)
+            """,
+            (user_id, user_type)
+        )
+        
+        cleared_count = cursor.rowcount
+        db.commit()
+        
+        return {
+            "message": f"已清除 {cleared_count} 个过期会话",
+            "cleared_count": cleared_count,
+            "user_id": user_id,
+            "user_type": user_type
+        }
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"清除过期会话数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="清除过期会话失败")
     finally:
         if cursor:
             cursor.close()
@@ -757,7 +929,7 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             table = info["table"]
             id_col = info["id_col"]
             cursor.execute(
-                f"SELECT id, {id_col} as username, name as full_name, phone, email, role, password, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') as updated_at FROM {table} WHERE id = %s",
+                f"SELECT id, {id_col} as username, {id_col} as user_specific_id, name as full_name, phone, email, role, password, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') as updated_at FROM {table} WHERE id = %s",
                 (real_user_id,)
             )
             row = cursor.fetchone()
@@ -767,13 +939,31 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             if not password_hash or not verify_password(payload.password, password_hash):
                 raise HTTPException(status_code=401, detail="用户名或密码错误")
             role = row.get("role") or real_user_type
+            # 使用用户专门的ID
+            user_specific_id = row.get("user_specific_id") or row.get("id")
             token_payload = {
-                "sub": row["id"],
+                "sub": user_specific_id,
                 "username": row["username"],
                 "roles": [role],
                 "user_type": real_user_type,
             }
             access_token = create_access_token(token_payload)
+            
+            # 单点登录：禁用该用户的所有现有会话
+            cursor.execute(
+                "UPDATE user_sessions SET is_active = FALSE WHERE user_id = %s AND user_type = %s",
+                (user_specific_id, real_user_type)
+            )
+            
+            # 创建新会话
+            cursor.execute(
+                "INSERT INTO user_sessions (user_id, user_type, token) VALUES (%s, %s, %s)",
+                (user_specific_id, real_user_type, access_token)
+            )
+            
+            # 提交事务
+            db.commit()
+            
             row.pop("password", None)
             user_out = UserOut(**row)
             return LoginResponse(access_token=access_token, user=user_out)
@@ -802,19 +992,41 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             raise HTTPException(status_code=400, detail="账号在多个用户类型中匹配，请指定 user_type")
         user_type, row = matched[0]
         role = row.get("role") or user_type
+        # 使用用户专门的ID
+        user_specific_id = row.get("user_specific_id") or row.get("id")
         token_payload = {
-            "sub": row["id"],
+            "sub": user_specific_id,
             "username": row["username"],
             "roles": [role],
             "user_type": user_type,
         }
         access_token = create_access_token(token_payload)
+        
+        # 单点登录：禁用该用户的所有现有会话
+        cursor.execute(
+            "UPDATE user_sessions SET is_active = FALSE WHERE user_id = %s AND user_type = %s",
+            (user_specific_id, user_type)
+        )
+        
+        # 创建新会话
+        cursor.execute(
+            "INSERT INTO user_sessions (user_id, user_type, token) VALUES (%s, %s, %s)",
+            (user_specific_id, user_type, access_token)
+        )
+        
+        # 提交事务
+        db.commit()
+        
         row.pop("password", None)
         user_out = UserOut(**row)
         return LoginResponse(access_token=access_token, user=user_out)
     except HTTPException:
+        # 回滚事务
+        db.rollback()
         raise
     except pymysql.MySQLError as e:
+        # 回滚事务
+        db.rollback()
         logger.error(f"用户登录数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="登录失败")
     finally:
@@ -2019,4 +2231,5 @@ def change_user_role(
     finally:
         if cursor:
             cursor.close()
+
 

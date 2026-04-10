@@ -1,11 +1,11 @@
-from pydantic import BaseModel, EmailStr, constr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Literal
 
 
 class BaseUserCreate(BaseModel):
     username: str
     password: Optional[str] = None
-    phone: Optional[constr(strip_whitespace=True, min_length=1, max_length=32)] = None
+    phone: Optional[str] = Field(None, min_length=1, max_length=32)
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
 
@@ -24,7 +24,7 @@ class AdminCreate(BaseUserCreate):
 
 class UserUpdate(BaseModel):
     user_type: Optional[Literal["student", "teacher", "admin"]] = None
-    phone: Optional[constr(strip_whitespace=True, min_length=1, max_length=32)] = None
+    phone: Optional[str] = Field(None, min_length=1, max_length=32)
     email: Optional[EmailStr] = None
     full_name: Optional[str] = None
     role: Optional[str] = None
@@ -35,7 +35,7 @@ class UserOut(BaseModel):
     id: int
     username: str
     phone: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     full_name: Optional[str] = None
     role: Optional[str] = None
     created_at: str
@@ -43,7 +43,7 @@ class UserOut(BaseModel):
 
 
 class UserBindPhone(BaseModel):
-    phone: constr(strip_whitespace=True, min_length=1, max_length=32)
+    phone: str = Field(..., min_length=1, max_length=32)
 
 
 class UserBindEmail(BaseModel):

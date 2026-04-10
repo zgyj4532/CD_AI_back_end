@@ -117,6 +117,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 说明：所有业务接口均挂载在前缀 `/api/v1` 下（见 [app/api/v1/routes.py](app/api/v1/routes.py)）。
 
+静态文件访问：`/doc` 和 `/uploads` 已映射为静态目录，可直接访问目录中的文件，例如 `/uploads/task_78.zip`、`/uploads/xxx.docx`、`/uploads/xxx.pdf`。
+
 ## 主要接口概览（/api/v1）
 
 - 材料 Materials（上传与查询）

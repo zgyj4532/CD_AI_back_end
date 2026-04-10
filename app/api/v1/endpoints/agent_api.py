@@ -7,6 +7,7 @@ from datetime import datetime
 import pymysql
 
 from app.database import get_db
+from app.static_config import UPLOADS_MOUNT_PATH
 from app.services.audit import submit_audit_task
 
 router = APIRouter()
@@ -123,6 +124,7 @@ async def submit_audit(
             "paper_id": paper_id,
             "version": version,
             "mysql_inserted": mysql_inserted,
+            "file_url": f"{UPLOADS_MOUNT_PATH}/task_{task_id}.zip",
         }
         
     except HTTPException:

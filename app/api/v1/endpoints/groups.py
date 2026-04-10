@@ -1077,15 +1077,15 @@ async def remove_group_member(
 )
 async def get_group_members(
     group_id: str,
-    member_type: Optional[str] = Query(None, description="成员类型筛选：student/teacher/admin"),
+    member_type: Optional[str] = Query(None, description="成员类型筛选：student/teacher/admin/all"),
     include_inactive: bool = Query(False, description="是否包含已移除成员"),
     current_user: str = Query('{"sub": 1, "roles": ["admin"], "username": "admin"}', description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
 ):
     cu = _parse_current_user(current_user)
     roles_norm = _normalize_roles(cu.get("roles", []))
 
-    if member_type and member_type not in ["student", "teacher", "admin"]:
-        raise HTTPException(status_code=400, detail="成员类型必须是student、teacher或admin")
+    if member_type and member_type not in ["student", "teacher", "admin", "all"]:
+        raise HTTPException(status_code=400, detail="成员类型必须是student、teacher、admin或all")
 
     conn = get_connection()
     cursor = None
@@ -1113,12 +1113,11 @@ async def get_group_members(
             sql = f"""
             SELECT
                 gm.group_id,
-                gm.member_id,
                 gm.member_type,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
-                s.student_id AS account_id,
+                s.student_id,
                 s.name,
                 s.phone,
                 s.email
@@ -1134,12 +1133,11 @@ async def get_group_members(
             sql = f"""
             SELECT
                 gm.group_id,
-                gm.member_id,
                 gm.member_type,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
-                t.teacher_id AS account_id,
+                t.teacher_id,
                 t.name,
                 t.phone,
                 t.email,
@@ -1157,12 +1155,11 @@ async def get_group_members(
             sql = f"""
             SELECT
                 gm.group_id,
-                gm.member_id,
                 gm.member_type,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
-                a.admin_id AS account_id,
+                a.admin_id,
                 a.name,
                 a.phone,
                 a.email,
@@ -1196,12 +1193,13 @@ async def get_group_members(
             "total": len(members),
             "members": [
                 {
-                    "member_id": m.get("member_id"),
                     "member_type": m.get("member_type"),
                     "is_active": int(m.get("is_active", 0)) if m.get("is_active") is not None else None,
                     "joined_at": _fmt_time(m.get("joined_at")),
                     "updated_at": _fmt_time(m.get("updated_at")),
-                    "account_id": m.get("account_id"),
+                    "student_id": m.get("student_id"),
+                    "teacher_id": m.get("teacher_id"),
+                    "admin_id": m.get("admin_id"),
                     "name": m.get("name"),
                     "phone": m.get("phone"),
                     "email": m.get("email"),
