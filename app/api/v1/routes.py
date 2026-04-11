@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
 	admin,
 	notifications,
 	users,
+	agent_api,
 )
 
 api_router = APIRouter()
@@ -24,4 +25,6 @@ api_router.include_router(annotations.router, prefix="/annotations", tags=["标�
 api_router.include_router(admin.router, prefix="/admin", tags=["管理"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["通知"])
 api_router.include_router(users.router, prefix="/users", tags=["用户"])
+api_router.include_router(agent_api.router, prefix="/agent", tags=["智能体"])
+
 

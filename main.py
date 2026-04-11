@@ -3,8 +3,15 @@ FastAPI 应用主入口：集中创建应用实例、配置中间件与路由。
 """
 
 from datetime import datetime
+import warnings
 
-import app.utils.logger as logger_config
+warnings.filterwarnings(
+	"ignore",
+	message=r"Valid config keys have changed in V2:\s*\* 'from_attributes' has been renamed to 'from_attributes'",
+	module=r"pydantic\._internal\._config",
+)
+
+# import app.utils.logger as logger_config
 
 import uvicorn
 from fastapi import FastAPI
@@ -31,6 +38,7 @@ openapi_tags = [
 	{"name": "标注", "description": "论文标注创建与查询"},
 	{"name": "管理", "description": "后台管理、模板与审计"},
 	{"name": "用户", "description": "用户创建、更新、导入与删除"},
+	{"name": "智能体", "description": "智能体API调用"},
 ]
 
 

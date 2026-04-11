@@ -1,31 +1,10 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Dict
 from urllib.parse import parse_qs, urlparse
 
 import pymysql
-
-
-def _load_dotenv(env_path: str = ".env") -> None:
-    """Load key=value pairs from .env into environment if not already set."""
-    path = Path(env_path)
-    if not path.is_file():
-        return
-
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-_load_dotenv()
+from app.config import settings
 
 
 def parse_mysql_url(url: str) -> Dict:
@@ -44,10 +23,7 @@ def parse_mysql_url(url: str) -> Dict:
     return dict(host=host, port=port, user=user, password=password, database=db, charset=charset)
 
 
-DEFAULT_DB_URL = os.getenv(
-    "DATABASE_URL",
-    "mysql+pymysql://root:sbtwsj1002@127.0.0.1:3306/cd_ai_db?charset=utf8mb4",
-)
+DEFAULT_DB_URL = settings.build_database_url()
 
 
 SCHOOLS_TABLE_SQL = """
@@ -171,6 +147,7 @@ CREATE TABLE IF NOT EXISTS `file_records` (
     `storage_path` VARCHAR(500) NOT NULL COMMENT '文件存储地址',
     `file_type` ENUM('document', 'essay') NOT NULL DEFAULT 'document' COMMENT '文件类型：document(文档)或essay(文章)',
     `version` INT NOT NULL DEFAULT 1 COMMENT '版本号',
+    `paper_id` INT DEFAULT NULL COMMENT '关联的论文ID',
     `remark` TEXT COMMENT '备注',
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
@@ -179,7 +156,8 @@ CREATE TABLE IF NOT EXISTS `file_records` (
     KEY `idx_uploader_id` (`uploader_id`),
     KEY `idx_filename` (`filename`),
     KEY `idx_upload_time` (`upload_time`),
-    KEY `idx_file_type` (`file_type`)
+    KEY `idx_file_type` (`file_type`),
+    KEY `idx_paper_id` (`paper_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文件记录表';
 """
 
@@ -252,6 +230,19 @@ CREATE TABLE IF NOT EXISTS `papers` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='论文信息表';
 """
 
+TASKS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `tasks` (
+    `id` INT NOT NULL AUTO_INCREMENT COMMENT '自增ID',
+    `task_id` INT NOT NULL COMMENT '智能体任务ID',
+    `paper_id` INT NOT NULL COMMENT '论文ID',
+    `version` VARCHAR(20) NOT NULL COMMENT '论文版本号',
+    `oss_key` TEXT NOT NULL COMMENT '文件路径',
+    `status` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT '任务状态',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_task_id` (`task_id`),
+    UNIQUE KEY `uniq_paper_version` (`paper_id`, `version`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='智能体任务表';
+"""
 
 PAPERS_HISTORY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `papers_history` (
@@ -305,7 +296,6 @@ CREATE TABLE IF NOT EXISTS `annotations` (
     `id` INT NOT NULL AUTO_INCREMENT COMMENT '批注ID',
     `paper_id` INT NOT NULL COMMENT '所属论文ID',
     `author_id` INT NOT NULL COMMENT '批注作者ID',
-    `author_name` VARCHAR(50) NOT NULL COMMENT '批注者姓名',
     `paragraph_id` VARCHAR(50) DEFAULT NULL COMMENT '段落ID（可选）',
     `coordinates` JSON DEFAULT NULL COMMENT '坐标信息（JSON格式）',
     `content` TEXT NOT NULL COMMENT '批注内容',
@@ -395,6 +385,22 @@ CREATE TABLE IF NOT EXISTS `user_messages` (
 """
 
 
+USER_SESSIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `user_sessions` (
+    `id` INT NOT NULL AUTO_INCREMENT COMMENT '会话ID',
+    `user_id` VARCHAR(64) NOT NULL COMMENT '用户ID',
+    `user_type` VARCHAR(20) NOT NULL COMMENT '用户类型（student/teacher/admin）',
+    `token` VARCHAR(512) NOT NULL COMMENT 'JWT令牌',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `last_activity` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后活动时间',
+    `is_active` BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否活跃',
+    PRIMARY KEY (`id`),
+    KEY `idx_user` (`user_id`, `user_type`),
+    KEY `idx_token` (`token`),
+    KEY `idx_active` (`is_active`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户会话管理表';
+"""
+
 def init_db(database_url: str | None = None) -> None:
     """Create base tables if missing (one-time use)."""
     url = database_url or DEFAULT_DB_URL
@@ -428,13 +434,14 @@ def init_db(database_url: str | None = None) -> None:
                 DDL_MANAGEMENT_TABLE_SQL,
                 TEMPLATES_TABLE_SQL,
                 USER_MESSAGES_TABLE_SQL,
+                USER_SESSIONS_TABLE_SQL,
                 OPERATION_LOGS_TABLE_SQL,
             ):
                 cur.execute(sql)
         print(
             "Tables ensured: schools, departments, students, teachers, admins, file_records, groups, group_members, "
             "papers, papers_history, paper_reviews, annotations, ddl_management, templates, "
-            "user_messages, operation_logs"
+            "user_messages, user_sessions, operation_logs"
         )
     finally:
         conn.close()
@@ -560,7 +567,6 @@ TABLE_COLUMN_DEFINITIONS = {
         "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '论文ID'",
         "owner_id": "`owner_id` INT NOT NULL COMMENT '所有者ID'",
         "teacher_id": "`teacher_id` INT NOT NULL COMMENT '老师ID'",
-        "teacher_name": "`teacher_name` VARCHAR(128) NOT NULL COMMENT '老师姓名'",
         "version": "`version` VARCHAR(20) NOT NULL COMMENT '当前版本号'",
         "size": "`size` INT NOT NULL COMMENT '文件大小（字节）'",
         "status": "`status` VARCHAR(32) NOT NULL COMMENT '状态（uploaded:已上传, processing:处理中, completed:完成, rejected:驳回）'",
@@ -578,7 +584,6 @@ TABLE_COLUMN_DEFINITIONS = {
     "papers_history": {
         "id": "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '历史版本ID'",
         "paper_id": "`paper_id` INT NOT NULL COMMENT '论文ID'",
-        "teacher_name": "`teacher_name` VARCHAR(128) NOT NULL COMMENT '老师姓名'",
         "version": "`version` VARCHAR(20) NOT NULL COMMENT '历史版本号'",
         "size": "`size` INT NOT NULL COMMENT '文件大小（字节）'",
         "status": "`status` VARCHAR(32) NOT NULL COMMENT '状态（如uploaded, processing, completed等）'",
@@ -661,6 +666,15 @@ TABLE_COLUMN_DEFINITIONS = {
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
         "status": "`status` VARCHAR(16) NOT NULL DEFAULT 'success' COMMENT '操作状态（success/failure）'",
     },
+    "user_sessions": {
+        "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '会话ID'",
+        "user_id": "`user_id` VARCHAR(64) NOT NULL COMMENT '用户ID'",
+        "user_type": "`user_type` VARCHAR(20) NOT NULL COMMENT '用户类型（student/teacher/admin）'",
+        "token": "`token` VARCHAR(512) NOT NULL COMMENT 'JWT令牌'",
+        "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'",
+        "last_activity": "`last_activity` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后活动时间'",
+        "is_active": "`is_active` BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否活跃'",
+    },
 }
 
 TABLE_INDEX_DEFINITIONS = {
@@ -721,14 +735,12 @@ TABLE_INDEX_DEFINITIONS = {
     "papers": [
         "CREATE INDEX idx_owner_id ON `papers` (owner_id)",
         "CREATE INDEX idx_teacher_id ON `papers` (teacher_id)",
-        "CREATE INDEX idx_teacher_name ON `papers` (teacher_name)",
         "CREATE INDEX idx_version ON `papers` (version)",
         "CREATE INDEX idx_status ON `papers` (status)",
         "CREATE INDEX idx_operated_time ON `papers` (operated_time)"
     ],
     "papers_history": [
         "CREATE INDEX idx_papers_history_paper_id ON `papers_history` (paper_id)",
-        "CREATE INDEX idx_papers_history_teacher_name ON `papers_history` (teacher_name)",
         "CREATE INDEX idx_papers_history_version ON `papers_history` (version)",
         "CREATE INDEX idx_papers_history_status ON `papers_history` (status)",
         "CREATE INDEX idx_papers_history_created_at ON `papers_history` (created_at)"
@@ -760,6 +772,11 @@ TABLE_INDEX_DEFINITIONS = {
     "operation_logs": [
         "CREATE INDEX idx_operation_logs_user_id ON `operation_logs` (user_id)",
         "CREATE INDEX idx_operation_logs_time ON `operation_logs` (operation_time)"
+    ],
+    "user_sessions": [
+        "CREATE INDEX idx_user ON `user_sessions` (user_id, user_type)",
+        "CREATE INDEX idx_token ON `user_sessions` (token)",
+        "CREATE INDEX idx_active ON `user_sessions` (is_active)"
     ],
 }
 
@@ -798,6 +815,7 @@ def sync_schema(database_url: str | None = None) -> None:
                 DDL_MANAGEMENT_TABLE_SQL,
                 TEMPLATES_TABLE_SQL,
                 USER_MESSAGES_TABLE_SQL,
+                USER_SESSIONS_TABLE_SQL,
                 OPERATION_LOGS_TABLE_SQL,
             ):
                 cur.execute(sql)
@@ -825,6 +843,11 @@ def sync_schema(database_url: str | None = None) -> None:
                 if col_def:
                     with conn.cursor() as cur:
                         cur.execute(f"ALTER TABLE `{table}` MODIFY COLUMN {col_def};")
+        
+        # Align user_sessions column definitions
+        for col_def in TABLE_COLUMN_DEFINITIONS.get("user_sessions", {}).values():
+            with conn.cursor() as cur:
+                cur.execute(f"ALTER TABLE `user_sessions` MODIFY COLUMN {col_def};")
 
         # Ensure enum definition for group_members.role includes owner
         with conn.cursor() as cur:

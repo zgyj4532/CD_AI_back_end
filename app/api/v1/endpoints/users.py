@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Body
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import csv
 import io
 import pymysql
@@ -19,9 +20,11 @@ from app.schemas.user import (
     LoginResponse,
 )
 from app.database import get_db
-from app.core.dependencies import get_current_user
-from app.core.security import create_access_token, get_password_hash, verify_password
+from app.core.security import create_access_token, get_password_hash, verify_password, decode_access_token
 from loguru import logger
+import pandas as pd
+
+security = HTTPBearer()
 
 
 def _parse_current_user(current_user: Optional[str]) -> dict:
@@ -85,7 +88,7 @@ class UserBindDepartment(BaseModel):
     department_name: Optional[str] = None 
 
 router = APIRouter()
-SUPPORTED_IMPORT_EXTS = (".csv", ".tsv")
+SUPPORTED_IMPORT_EXTS = (".csv", ".tsv", ".xlsx")
 
 USER_TABLES = {
     "admin": {"table": "admins", "id_col": "admin_id", "role_col": "role"},
@@ -123,7 +126,7 @@ def _fetch_user_for_login(
     if user_type == "admin":
         cursor.execute(
             f"""
-            SELECT id, {id_col} as username, name as full_name, phone, email, role,
+            SELECT id, {id_col} as username, {id_col} as user_specific_id, name as full_name, phone, email, role,
                    password,
                    DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                    DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
@@ -134,7 +137,7 @@ def _fetch_user_for_login(
     else:
         cursor.execute(
             f"""
-            SELECT id, {id_col} as username, name as full_name, phone, email,
+            SELECT id, {id_col} as username, {id_col} as user_specific_id, name as full_name, phone, email,
                    password,
                    DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at,
                    DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at
@@ -151,7 +154,8 @@ def _fetch_user_for_login(
 
 
 def _normalize_user_type(user_type: str | None) -> str:
-    value = (user_type or "admin").strip().lower()
+    user_type_str = str(user_type) if user_type is not None else "admin"
+    value = user_type_str.strip().lower()
     if value not in USER_TABLES:
         raise HTTPException(status_code=400, detail="user_type 必须为 student/teacher/admin")
     return value
@@ -689,15 +693,54 @@ def user_bind_department(
     description="根据当前登录用户信息返回用户表中的全部字段（不包含密码）",
 )
 def get_current_user_info(
-    current_user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     db: pymysql.connections.Connection = Depends(get_db),
 ):
     cursor = None
     try:
-        user_id = current_user.get("sub")
+        token = credentials.credentials
+        payload = decode_access_token(token)
+        
+        if payload is None:
+            raise HTTPException(
+                status_code=401,
+                detail="无效的认证凭据",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 验证会话是否活跃
+        user_id = payload.get("sub")
         if not user_id:
-            raise HTTPException(status_code=401, detail="请先登录")
-        user_type = _resolve_user_type_from_payload(current_user)
+            raise HTTPException(
+                status_code=401,
+                detail="无效的用户ID",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_type = payload.get("user_type")
+        
+        # 检查会话是否存在且活跃
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT is_active FROM user_sessions WHERE token = %s AND user_id = %s AND user_type = %s",
+            (token, user_id, user_type)
+        )
+        session = cursor.fetchone()
+        
+        if not session or not session[0]:
+            raise HTTPException(
+                status_code=401,
+                detail="该账号已在别处登录，若非本人操作，请及时修改密码",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 更新最后活动时间
+        cursor.execute(
+            "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE token = %s",
+            (token,)
+        )
+        
+        # 获取用户信息
+        user_type = _resolve_user_type_from_payload(payload)
         info = USER_TABLES[user_type]
         table = info["table"]
         cursor = db.cursor(pymysql.cursors.DictCursor)
@@ -710,8 +753,139 @@ def get_current_user_info(
     except HTTPException:
         raise
     except pymysql.MySQLError as e:
+        db.rollback()
         logger.error(f"获取用户信息数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="获取用户信息失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.get(
+    "/check-session",
+    summary="检查用户会话状态",
+    description="检查用户会话是否活跃，用于实现单点登录功能"
+)
+def check_session(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    """
+    检查用户会话状态，用于实现单点登录功能
+    
+    - 验证 JWT 令牌的有效性
+    - 检查会话是否存在且活跃
+    - 如果会话不存在或不活跃，返回 401 错误
+    """
+    cursor = None
+    try:
+        token = credentials.credentials
+        payload = decode_access_token(token)
+        
+        if payload is None:
+            raise HTTPException(
+                status_code=401,
+                detail="无效的认证凭据",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 验证会话是否活跃
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="无效的用户ID",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_type = payload.get("user_type")
+        
+        # 检查会话是否存在且活跃（使用时间复杂度最小的方式：直接通过token、user_id、user_type查询）
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT is_active FROM user_sessions WHERE token = %s AND user_id = %s AND user_type = %s",
+            (token, user_id, user_type)
+        )
+        session = cursor.fetchone()
+        
+        if not session or not session[0]:
+            # 会话不存在或不活跃（被顶号）
+            raise HTTPException(
+                status_code=401,
+                detail="账号已在别处登录，若非本人操作，请及时更改密码",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # 会话活跃，更新最后活动时间
+        cursor.execute(
+            "UPDATE user_sessions SET last_activity = CURRENT_TIMESTAMP WHERE token = %s",
+            (token,)
+        )
+        db.commit()
+        
+        return {
+            "status": "active",
+            "message": "会话活跃",
+            "user_id": user_id,
+            "user_type": user_type
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"检查会话状态数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="检查会话状态失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.post(
+    "/clear-expired-sessions",
+    summary="清除过期会话",
+    description="清除指定用户的过期会话（is_active=0且创建时间超过2小时）"
+)
+def clear_expired_sessions(
+    user_id: str = Query(..., description="用户专门的ID，如student_id、teacher_id、admin_id"),
+    user_type: str = Query(..., description="用户类型（student/teacher/admin）"),
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    """
+    清除指定用户的过期会话
+    
+    - 只删除创建时间超过2小时的过期会话（is_active=0）
+    - 保留近期的过期会话，用于顶号判断
+    - 用于登录时清理旧的过期会话，避免数据库膨胀
+    - user_id参数为用户专门的ID，如student_id、teacher_id、admin_id
+    """
+    cursor = None
+    try:
+        cursor = db.cursor()
+        
+        # 只删除创建时间超过2小时的过期会话
+        cursor.execute(
+            """
+            DELETE FROM user_sessions 
+            WHERE user_id = %s 
+            AND user_type = %s 
+            AND is_active = 0 
+            AND created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR)
+            """,
+            (user_id, user_type)
+        )
+        
+        cleared_count = cursor.rowcount
+        db.commit()
+        
+        return {
+            "message": f"已清除 {cleared_count} 个过期会话",
+            "cleared_count": cleared_count,
+            "user_id": user_id,
+            "user_type": user_type
+        }
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"清除过期会话数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="清除过期会话失败")
     finally:
         if cursor:
             cursor.close()
@@ -748,7 +922,7 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             table = info["table"]
             id_col = info["id_col"]
             cursor.execute(
-                f"SELECT id, {id_col} as username, name as full_name, phone, email, role, password, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') as updated_at FROM {table} WHERE id = %s",
+                f"SELECT id, {id_col} as username, {id_col} as user_specific_id, name as full_name, phone, email, role, password, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') as updated_at FROM {table} WHERE id = %s",
                 (real_user_id,)
             )
             row = cursor.fetchone()
@@ -758,13 +932,31 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             if not password_hash or not verify_password(payload.password, password_hash):
                 raise HTTPException(status_code=401, detail="用户名或密码错误")
             role = row.get("role") or real_user_type
+            # 使用用户专门的ID
+            user_specific_id = row.get("user_specific_id") or row.get("id")
             token_payload = {
-                "sub": row["id"],
+                "sub": user_specific_id,
                 "username": row["username"],
                 "roles": [role],
                 "user_type": real_user_type,
             }
             access_token = create_access_token(token_payload)
+            
+            # 单点登录：禁用该用户的所有现有会话
+            cursor.execute(
+                "UPDATE user_sessions SET is_active = FALSE WHERE user_id = %s AND user_type = %s",
+                (user_specific_id, real_user_type)
+            )
+            
+            # 创建新会话
+            cursor.execute(
+                "INSERT INTO user_sessions (user_id, user_type, token) VALUES (%s, %s, %s)",
+                (user_specific_id, real_user_type, access_token)
+            )
+            
+            # 提交事务
+            db.commit()
+            
             row.pop("password", None)
             user_out = UserOut(**row)
             return LoginResponse(access_token=access_token, user=user_out)
@@ -793,19 +985,41 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             raise HTTPException(status_code=400, detail="账号在多个用户类型中匹配，请指定 user_type")
         user_type, row = matched[0]
         role = row.get("role") or user_type
+        # 使用用户专门的ID
+        user_specific_id = row.get("user_specific_id") or row.get("id")
         token_payload = {
-            "sub": row["id"],
+            "sub": user_specific_id,
             "username": row["username"],
             "roles": [role],
             "user_type": user_type,
         }
         access_token = create_access_token(token_payload)
+        
+        # 单点登录：禁用该用户的所有现有会话
+        cursor.execute(
+            "UPDATE user_sessions SET is_active = FALSE WHERE user_id = %s AND user_type = %s",
+            (user_specific_id, user_type)
+        )
+        
+        # 创建新会话
+        cursor.execute(
+            "INSERT INTO user_sessions (user_id, user_type, token) VALUES (%s, %s, %s)",
+            (user_specific_id, user_type, access_token)
+        )
+        
+        # 提交事务
+        db.commit()
+        
         row.pop("password", None)
         user_out = UserOut(**row)
         return LoginResponse(access_token=access_token, user=user_out)
     except HTTPException:
+        # 回滚事务
+        db.rollback()
         raise
     except pymysql.MySQLError as e:
+        # 回滚事务
+        db.rollback()
         logger.error(f"用户登录数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="登录失败")
     finally:
@@ -1348,31 +1562,61 @@ def delete_user(
 @router.post(
     "/import",
     summary="一键导入用户",
-    description="上传 CSV/TSV 文件批量导入用户（列：username,user_type,email,full_name,role,password 可选）"
+    description="上传 CSV/TSV 文件批量导入用户（列：username,user_type,full_name,role,password 可选）"
 )
 async def import_users(file: UploadFile = File(...), db: pymysql.connections.Connection = Depends(get_db)):
     filename = file.filename or ""
     lower_name = filename.lower()
     if not lower_name.endswith(SUPPORTED_IMPORT_EXTS):
-        raise HTTPException(status_code=400, detail="仅支持 .csv 或 .tsv 文件")
+        raise HTTPException(status_code=400, detail=f"仅支持 {', '.join(SUPPORTED_IMPORT_EXTS)} 文件")
 
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="上传文件为空")
 
-    delimiter = "\t" if lower_name.endswith(".tsv") else ","
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        try:
-            text = content.decode("gbk")
-        except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail="文件编码仅支持 UTF-8 或 GBK")
-
-    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows = []
     required_col = "username"
-    if required_col not in reader.fieldnames:
-        raise HTTPException(status_code=400, detail="文件缺少 username 列")
+    
+    # 处理不同文件类型
+    if lower_name.endswith(('.xlsx', '.xls')):
+        # 处理Excel文件：核心修复1：避免科学计数法，完整保留数字
+        # 读取时指定 dtype=str，强制所有单元格为字符串，彻底解决科学计数法问题
+        df = pd.read_excel(io.BytesIO(content), dtype=str)
+        
+        # 核心修复2：处理列名，避免int类型strip报错
+        df.columns = [
+            str(col).strip() if pd.notna(col) else "" 
+            for col in df.columns
+        ]
+        
+        # 检查必填列
+        if required_col not in df.columns:
+            raise HTTPException(status_code=400, detail="文件缺少 username 列")
+        
+        # 核心修复3：清理所有单元格的空值和空格，确保所有数据为字符串
+        df = df.fillna("").astype(str)
+        for col in df.columns:
+            df[col] = df[col].str.strip()
+        
+        # 转换为字典列表
+        rows = df.to_dict(orient="records")
+    else:
+        # 处理CSV/TSV文件
+        delimiter = "\t" if lower_name.endswith(".tsv") else ","
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                text = content.decode("gbk")
+            except UnicodeDecodeError:
+                raise HTTPException(status_code=400, detail="文件编码仅支持 UTF-8 或 GBK")
+
+        reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+        if reader.fieldnames is None:
+            raise HTTPException(status_code=400, detail="CSV 文件缺少标题行或文件为空")
+        if required_col not in reader.fieldnames:
+            raise HTTPException(status_code=400, detail="文件缺少 username 列")
+        rows = list(reader)
 
     created, updated = 0, 0
     default_role = "admin"
@@ -1382,18 +1626,30 @@ async def import_users(file: UploadFile = File(...), db: pymysql.connections.Con
     updated_items = []
     try:
         cursor = db.cursor()
-        for row in reader:
-            username = (row.get("username") or "").strip()
+        for row in rows:
+            # 核心修复4：增强safe_get_str，彻底避免int/float类型strip报错
+            def safe_get_str(key):
+                val = row.get(key)
+                if val is None or pd.isna(val):
+                    return ""
+                # 统一转字符串，彻底避免类型错误
+                s = str(val)
+                return s.strip()
+            
+            username = safe_get_str("username")
             if not username:
                 continue
-            user_type = _normalize_user_type(row.get("user_type") or "admin")
+            
+            user_type_val = safe_get_str("user_type") or "admin"
+            user_type = _normalize_user_type(user_type_val)
             info = USER_TABLES[user_type]
             table = info["table"]
-            phone = (row.get("phone") or None) and row.get("phone").strip()
-            email = (row.get("email") or None) and row.get("email").strip()
-            full_name = (row.get("full_name") or None) and row.get("full_name").strip()
-            role = (row.get("role") or default_role).strip() or default_role
-            password = (row.get("password") or default_password).strip() or default_password
+            phone_val = safe_get_str("phone")
+            phone = phone_val if phone_val else None
+            email = "string"
+            full_name = safe_get_str("full_name")
+            role = safe_get_str("role") or default_role
+            password = safe_get_str("password") or default_password
             password_hash = get_password_hash(password)
             if not full_name:
                 full_name = username  # 默认使用username作为full_name
@@ -1481,6 +1737,118 @@ async def import_users(file: UploadFile = File(...), db: pymysql.connections.Con
         if cursor:
             cursor.close()
 
+@router.get(
+    "/all",
+    summary="查询所有用户",
+    description="管理员查询学生、教师或管理员表中的所有人的信息，支持三选一或查询全部"
+)
+def get_all_users(
+    user_type: Optional[str] = Query(None, description="用户类型：student/teacher/admin，不指定则查询全部"),
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
+):
+    # 解析当前用户信息
+    current_user_info = _parse_current_user(current_user)
+    # 验证当前用户是管理员
+    user_roles = current_user_info.get("roles", [])
+    if "admin" not in user_roles and "管理员" not in user_roles:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        
+        # 构建查询
+        results = []
+        
+        # 如果指定了用户类型，只查询对应表
+        if user_type:
+            user_type = _normalize_user_type(user_type)
+            info = USER_TABLES[user_type]
+            table = info["table"]
+            id_col = info["id_col"]
+            
+            if user_type == "admin":
+                cursor.execute(f"""
+                    SELECT 
+                        {id_col} as user_id, 
+                        name,
+                        created_at,
+                        updated_at
+                    FROM {table}
+                """)
+            else:
+                cursor.execute(f"""
+                    SELECT 
+                        {id_col} as user_id, 
+                        name,
+                        created_at,
+                        updated_at
+                    FROM {table}
+                """)
+            
+            rows = cursor.fetchall()
+            for row in rows:
+                row["user_type"] = user_type
+                # 转换日期时间格式
+                if "created_at" in row and row["created_at"]:
+                    if isinstance(row["created_at"], datetime):
+                        row["created_at"] = row["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+                if "updated_at" in row and row["updated_at"]:
+                    if isinstance(row["updated_at"], datetime):
+                        row["updated_at"] = row["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+                results.append(row)
+        else:
+            # 查询所有三个表
+            for ut in ["student", "teacher", "admin"]:
+                info = USER_TABLES[ut]
+                table = info["table"]
+                id_col = info["id_col"]
+                
+                if ut == "admin":
+                    cursor.execute(f"""
+                        SELECT 
+                            {id_col} as user_id, 
+                            name,
+                            created_at,
+                            updated_at
+                        FROM {table}
+                    """)
+                else:
+                    cursor.execute(f"""
+                        SELECT 
+                            {id_col} as user_id, 
+                            name,
+                            created_at,
+                            updated_at
+                        FROM {table}
+                    """)
+                
+                rows = cursor.fetchall()
+                for row in rows:
+                    row["user_type"] = ut
+                    # 转换日期时间格式
+                    if "created_at" in row and row["created_at"]:
+                        if isinstance(row["created_at"], datetime):
+                            row["created_at"] = row["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    if "updated_at" in row and row["updated_at"]:
+                        if isinstance(row["updated_at"], datetime):
+                            row["updated_at"] = row["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    results.append(row)
+        
+        return {
+            "code": 200,
+            "message": "查询成功",
+            "data": results
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        logger.error(f"查询所有用户数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="查询所有用户失败")
+    finally:
+        if cursor:
+            cursor.close()
 
 @router.put(
     "/{user_id}/bind-phone",
@@ -1559,179 +1927,6 @@ def bind_email(
         db.rollback()
         logger.error(f"绑定邮箱数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="绑定邮箱失败")
-    finally:
-        if cursor:
-            cursor.close()
-
-
-
-
-
-def _validate_school_exists(cursor: pymysql.cursors.Cursor, school_id: int) -> bool:
-    """校验学校ID是否存在"""
-    cursor.execute("SELECT 1 FROM schools WHERE school_id = %s LIMIT 1", (school_id,))
-    return bool(cursor.fetchone())
-
-def _validate_department_exists(cursor: pymysql.cursors.Cursor, department_id: int) -> bool:
-    """校验院系ID是否存在"""
-    cursor.execute("SELECT 1 FROM departments WHERE department_id = %s LIMIT 1", (department_id,))
-    return bool(cursor.fetchone())
-
-def _get_school_name_by_id(cursor: pymysql.cursors.Cursor, school_id: int) -> str | None:
-    """根据学校ID获取学校名称"""
-    cursor.execute("SELECT school_name FROM schools WHERE school_id = %s LIMIT 1", (school_id,))
-    row = cursor.fetchone()
-    return row["school_name"] if row else None
-
-def _get_department_name_by_id(cursor: pymysql.cursors.Cursor, department_id: int) -> str | None:
-    """根据院系ID获取院系名称"""
-    cursor.execute("SELECT department_name FROM departments WHERE department_id = %s LIMIT 1", (department_id,))
-    row = cursor.fetchone()
-    return row["department_name"] if row else None
-
-# ========== 绑定学校接口 ==========
-@router.put(
-    "/{user_id}/bind-school",
-    response_model=UserOut,
-    summary="绑定用户学校",
-    description="为指定用户绑定/更新所属学校信息（仅管理员可操作）"
-)
-def bind_school(
-    user_id: int,
-    payload: UserBindSchool,
-    db: pymysql.connections.Connection = Depends(get_db),
-    user_type: str = Query("admin", description="用户类型：student/teacher/admin"),
-    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
-):
-    # 1. 校验管理员权限
-    current_user_info = _parse_current_user(current_user)
-    user_roles = current_user_info.get("roles", [])
-    if "admin" not in user_roles and "管理员" not in user_roles:
-        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
-    
-    cursor = None
-    try:
-        cursor = db.cursor(pymysql.cursors.DictCursor)
-        # 2. 标准化用户类型 & 校验用户是否存在
-        user_type = _normalize_user_type(user_type)
-        table = USER_TABLES[user_type]["table"]
-        cursor.execute(f"SELECT id FROM {table} WHERE id = %s LIMIT 1", (user_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
-        
-        # 3. 校验学校ID是否存在
-        if not _validate_school_exists(cursor, payload.school_id):
-            raise HTTPException(status_code=404, detail="学校不存在")
-        
-        # 4. 强制从数据库获取学校名称（不再使用传入的名称）
-        school_name = _get_school_name_by_id(cursor, payload.school_id)
-        if not school_name:
-            raise HTTPException(status_code=500, detail="无法获取学校名称")
-        
-        # 5. 构造更新语句
-        update_fields = [
-            "school_id = %s",
-            "school_name = %s",
-            "updated_at = NOW()"
-        ]
-        update_params = [payload.school_id, school_name, user_id]
-        
-        # 6. 执行更新
-        cursor.execute(
-            f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = %s",
-            tuple(update_params)
-        )
-        db.commit()
-        
-        # 7. 查询更新后用户信息并返回
-        updated_user = _fetch_user(cursor, user_id, user_type)
-        if not updated_user:
-            raise HTTPException(status_code=500, detail="绑定学校后查询用户信息失败")
-        return UserOut(**updated_user)
-    
-    except HTTPException:
-        raise
-    except pymysql.MySQLError as e:
-        db.rollback()
-        logger.error(f"绑定学校数据库错误: {str(e)}")
-        raise HTTPException(status_code=500, detail="绑定学校失败")
-    finally:
-        if cursor:
-            cursor.close()
-
-# ========== 绑定院系接口 ==========
-@router.put(
-    "/{user_id}/bind-department",
-    response_model=UserOut,
-    summary="绑定用户院系",
-    description="为指定用户绑定/更新所属院系信息（仅管理员可操作）"
-)
-def bind_department(
-    user_id: int,
-    payload: UserBindDepartment,
-    db: pymysql.connections.Connection = Depends(get_db),
-    user_type: str = Query("admin", description="用户类型：student/teacher/admin"),
-    current_user: Optional[str] = Query(None, description="管理员信息(JSON字符串，包含 sub/username/roles)"),
-):
-    # 1. 校验管理员权限
-    current_user_info = _parse_current_user(current_user)
-    user_roles = current_user_info.get("roles", [])
-    if "admin" not in user_roles and "管理员" not in user_roles:
-        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
-    
-    cursor = None
-    try:
-        cursor = db.cursor(pymysql.cursors.DictCursor)
-        # 2. 标准化用户类型 & 校验用户是否存在
-        user_type = _normalize_user_type(user_type)
-        table = USER_TABLES[user_type]["table"]
-        cursor.execute(f"SELECT id FROM {table} WHERE id = %s LIMIT 1", (user_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail=f"{user_type}用户不存在")
-        
-        # 3. 校验院系ID是否存在
-        if not _validate_department_exists(cursor, payload.department_id):
-            raise HTTPException(status_code=404, detail="院系不存在")
-        
-        # 4. 强制从数据库获取院系名称（不再使用传入的名称）
-        dept_name = _get_department_name_by_id(cursor, payload.department_id)
-        if not dept_name:
-            raise HTTPException(status_code=500, detail="无法获取院系名称")
-        
-        # 5. 构造更新语句（兼容教师表原有department字段）
-        update_fields = [
-            "department_id = %s",
-            "department_name = %s",
-            "updated_at = NOW()"
-        ]
-        update_params = [payload.department_id, dept_name]
-        
-        # 兼容教师表的department字段（同步更新）
-        if user_type == "teacher":
-            update_fields.append("department = %s")
-            update_params.append(dept_name)
-        
-        update_params.append(user_id)
-        
-        # 6. 执行更新
-        cursor.execute(
-            f"UPDATE {table} SET {', '.join(update_fields)} WHERE id = %s",
-            tuple(update_params)
-        )
-        db.commit()
-        
-        # 7. 查询更新后用户信息并返回
-        updated_user = _fetch_user(cursor, user_id, user_type)
-        if not updated_user:
-            raise HTTPException(status_code=500, detail="绑定院系后查询用户信息失败")
-        return UserOut(**updated_user)
-    
-    except HTTPException:
-        raise
-    except pymysql.MySQLError as e:
-        db.rollback()
-        logger.error(f"绑定院系数据库错误: {str(e)}")
-        raise HTTPException(status_code=500, detail="绑定院系失败")
     finally:
         if cursor:
             cursor.close()
@@ -2029,3 +2224,5 @@ def change_user_role(
     finally:
         if cursor:
             cursor.close()
+
+

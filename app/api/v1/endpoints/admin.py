@@ -474,8 +474,8 @@ def calculate_total_uploaded_papers(
 
 @router.get(
     "/stats/papers/unreviewed/total",
-    summary="计算总未审阅论文数",
-    description="统计论文表中状态为「未审阅」的论文总数（仅管理员可访问）"
+    summary="计算总待审阅论文数",
+    description="统计论文表中状态为「待审阅」的论文总数（仅管理员可访问）"
 )
 def calculate_total_unreviewed_papers(
     user=Depends(admin_only),
@@ -484,19 +484,19 @@ def calculate_total_unreviewed_papers(
     cursor = None
     try:
         cursor = db.cursor()
-        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '未审阅';"
+        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '待审阅';"
         cursor.execute(count_sql)
         total_unreviewed = cursor.fetchone()[0]
         return {
             "total_unreviewed_papers": total_unreviewed,
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "code": 200,
-            "message": "未审阅论文数统计成功"
+            "message": "待审阅论文数统计成功"
         }
     except pymysql.MySQLError as e:
         raise HTTPException(
             status_code=500,
-            detail=f"计算未审阅论文数失败：{str(e)}"
+            detail=f"计算待审阅论文数失败：{str(e)}"
         )
     finally:
         if cursor:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List
+from urllib.parse import quote_plus
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -54,17 +55,18 @@ class Settings(BaseSettings):
             return v
         return ["*"]
 
+    def build_database_url(self) -> str:
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
+        return (
+            f"mysql+pymysql://{quote_plus(self.MYSQL_USER)}:{quote_plus(self.MYSQL_PASSWORD)}"
+            f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}?charset=utf8mb4"
+        )
+
 
 # Instantiate settings and compute DATABASE_URL if not provided
 _settings = Settings()
 # parse CORS origins into a list and compute DATABASE_URL if needed
 cors_list = _settings.parse_cors()
-if not _settings.DATABASE_URL:
-    _database_url = (
-        f"mysql+pymysql://{_settings.MYSQL_USER}:{_settings.MYSQL_PASSWORD}"
-        f"@{_settings.MYSQL_HOST}:{_settings.MYSQL_PORT}/{_settings.MYSQL_DATABASE}?charset=utf8mb4"
-    )
-    settings = _settings.model_copy(update={"DATABASE_URL": _database_url, "CORS_ORIGINS": cors_list})
-else:
-    settings = _settings.model_copy(update={"CORS_ORIGINS": cors_list})
+settings = _settings.model_copy(update={"DATABASE_URL": _settings.build_database_url(), "CORS_ORIGINS": cors_list})
 

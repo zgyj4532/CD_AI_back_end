@@ -16,6 +16,7 @@ from app.schemas.document import (
     DDLOut, 
 )
 from app.services.oss import get_file_from_oss, upload_paper_to_storage
+from app.services.audit import submit_audit_task
 from datetime import datetime
 from app.database import get_db
 import pymysql
@@ -241,6 +242,16 @@ async def upload_paper(
                 now,
                 now
             )
+        )
+
+        await submit_audit_task(
+            db,
+            file_content=contents,
+            filename=file.filename,
+            paper_id=paper_id,
+            version=version,
+            oss_key=oss_key,
+            audit_config='{"checks": ["grammar", "plagiarism"]}',
         )
         db.commit()
     except pymysql.MySQLError as e:
@@ -502,7 +513,7 @@ def create_paper_status(
             submitted_by_id, submitted_by_name, submitted_by_role,
             operated_by, operated_time, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (paper_id,))
         origin_submit = cursor.fetchone()
@@ -658,7 +669,7 @@ def update_paper_status(
             submitted_by_id, submitted_by_name, submitted_by_role,
             operated_by, operated_time, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (paper_id,))
         origin_submit = cursor.fetchone()
@@ -1282,17 +1293,10 @@ def create_ddl(
         cursor.execute("SELECT member_id, member_type FROM group_members WHERE group_id = %s AND is_active = 1", (group_id,))
         members = cursor.fetchall()
         
-        # 检查群组是否已经有DDL
-        if members:
-            # 获取群组第一个成员的ID
-            first_member_id = members[0][0]
-            # 检查该成员是否有任何DDL消息（无论是否已读）
-            cursor.execute(
-                "SELECT id FROM user_messages WHERE user_id = %s AND source = 'ddl'", 
-                (str(first_member_id),)
-            )
-            if cursor.fetchone():
-                raise HTTPException(status_code=400, detail="已有DDL存在，无法创建新的DDL")
+        # 检查群组是否已经有DDL（在ddl_management表中查找）
+        cursor.execute("SELECT ddlid FROM ddl_management WHERE group_id = %s", (group_id,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="已有DDL存在，无法创建新的DDL")
         
         # 创建DDL记录
         create_sql = """
@@ -1801,12 +1805,13 @@ async def get_paper_detail(
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
-        # 仅查询指定字段（严格匹配你要求的列表）
+        # 仅查询指定字段
         paper_sql = """
         SELECT 
             id, owner_id, teacher_id, version, size, status, detail, 
             DATE_FORMAT(ddl, '%%Y-%%m-%%d %%H:%%i:%%s') as ddl,
-            oss_key, pdf_oss_key
+            oss_key, pdf_oss_key,
+            DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') as updated_at  -- 新增更新时间字段，格式化输出
         FROM papers 
         WHERE id = %s
         """

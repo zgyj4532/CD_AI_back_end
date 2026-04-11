@@ -1,6 +1,5 @@
 import pymysql
 from typing import Optional
-from datetime import datetime
 from app.models.document import DocumentRecord
 
 

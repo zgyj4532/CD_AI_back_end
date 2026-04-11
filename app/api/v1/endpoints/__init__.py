@@ -5,7 +5,7 @@ This module explicitly imports endpoint submodules so that
 and each submodule's `router` is available for registration.
 """
 
-from . import documents, groups, papers, ai_review, annotations, admin
+from . import documents, groups, papers, ai_review, annotations, admin, agent_api
 
 __all__ = [
 	"documents",
@@ -14,5 +14,7 @@ __all__ = [
 	"ai_review",
 	"annotations",
 	"admin",
+	"agent_api",
 ]
+
 

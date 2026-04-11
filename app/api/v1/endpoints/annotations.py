@@ -1,30 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from app.core.dependencies import get_current_user
-from app.schemas.annotation import AnnotationCreate, AnnotationOut
+from app.schemas.annotation import AnnotationOut
 import pymysql
 import json
 from app.database import get_db
 from loguru import logger
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 import urllib.parse
 import re 
-from pydantic import BaseModel
 
 router = APIRouter()
 
-class AnnotationOut(BaseModel):
-    id: int
-    paper_id: int
-    author_id: int
-    paragraph_id: Optional[str] = None
-    coordinates: Optional[Dict[str, float]] = None
-    content: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-    class Config:
-        orm_mode = True
 
 def _parse_current_user(current_user: Optional[str]) -> dict:
     try:

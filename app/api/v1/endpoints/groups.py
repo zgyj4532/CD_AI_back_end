@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File,  HTTPException, Query, Header
+from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from pydantic import BaseModel  
 import json
@@ -6,6 +7,10 @@ import pymysql
 from datetime import datetime  
 from loguru import logger  
 from app.database import get_connection
+import io
+import zipfile
+from app.services.oss import get_file_from_oss
+import pandas as pd
 
 router = APIRouter()
 
@@ -175,19 +180,13 @@ def list_groups(
                 (
                     SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.group_id AND gm.member_type='student' AND gm.is_active=1
                 ) AS student_count,
-                (SELECT COUNT(DISTINCT p.id)
+                (
+                    SELECT COUNT(DISTINCT p.id)
                     FROM papers p
                     WHERE p.owner_id IN (
                         SELECT member_id FROM group_members WHERE group_id = g.group_id AND member_type='student' AND is_active=1
-                    ) AND p.status = '待审阅'
-                ) AS pending_papers,
-                (
-                    SELECT COUNT(DISTINCT p2.id)
-                    FROM papers p2
-                    WHERE p2.owner_id IN (
-                        SELECT member_id FROM group_members WHERE group_id = g.group_id AND member_type='student' AND is_active=1
-                    ) AND p2.status = '已审阅'
-                ) AS reviewed_papers
+                    )
+                ) AS paper_count
             FROM `groups` g
             WHERE (g.group_id LIKE %s OR g.group_name LIKE %s)
             ORDER BY g.created_at DESC
@@ -228,19 +227,13 @@ def list_groups(
                 (
                     SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.group_id AND gm.member_type='student' AND gm.is_active=1
                 ) AS student_count,
-                (SELECT COUNT(DISTINCT p.id)
+                (
+                    SELECT COUNT(DISTINCT p.id)
                     FROM papers p
                     WHERE p.owner_id IN (
                         SELECT member_id FROM group_members WHERE group_id = g.group_id AND member_type='student' AND is_active=1
-                    ) AND p.status = '待审阅'
-                ) AS pending_papers,
-                (
-                    SELECT COUNT(DISTINCT p2.id)
-                    FROM papers p2
-                    WHERE p2.owner_id IN (
-                        SELECT member_id FROM group_members WHERE group_id = g.group_id AND member_type='student' AND is_active=1
-                    ) AND p2.status = '已审阅'
-                ) AS reviewed_papers
+                    )
+                ) AS paper_count
             FROM `groups` g
             WHERE EXISTS (
                 SELECT 1 FROM group_members gm2 WHERE gm2.group_id = g.group_id AND gm2.member_id = %s AND gm2.is_active=1
@@ -275,8 +268,7 @@ def list_groups(
                 "group_name": row["group_name"],
                 "description": row.get("description"),
                 "student_count": int(row.get("student_count", 0) or 0),
-                "pending_papers": int(row.get("pending_papers", 0) or 0),
-                "reviewed_papers": int(row.get("reviewed_papers", 0) or 0),
+                "paper_count": int(row.get("paper_count", 0) or 0),
                 "created_at": row["created_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("created_at") else None,
                 "updated_at": row["updated_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("updated_at") else None,
             })
@@ -340,12 +332,12 @@ async def import_groups(
         conn.close()
 
     # 基础文件格式校验
-    supported_formats = ('.tsv', '.csv')
+    supported_formats = ('.tsv', '.csv', '.xlsx')
     if not file.filename.lower().endswith(supported_formats):
         logger.warning(f"用户{current_user['username']}上传非支持文件：{file.filename}，支持格式：{supported_formats}")
         raise HTTPException(
             status_code=400,
-            detail=f"请上传文本表格文件（{', '.join(supported_formats)}）"
+            detail=f"请上传表格文件（{', '.join(supported_formats)}）"
         )
     content = await file.read()
     if not content:
@@ -356,45 +348,77 @@ async def import_groups(
     try:
         import_data = []
         required_cols = {"群组编号", "群组名称", "教师工号", "学生学号", "学生姓名"}
-        delimiter = '\t' if file.filename.lower().endswith('.tsv') else ','  
         
-        try:
-            text_content = content.decode('utf-8-sig')  # 自动处理UTF-8 BOM
-        except UnicodeDecodeError:
+        # 处理不同文件类型
+        if file.filename.lower().endswith('.xlsx'):
+            # 处理Excel文件
+            df = pd.read_excel(io.BytesIO(content))
+            # 转换列名
+            df.columns = [col.strip() for col in df.columns]
+            # 检查必填列
+            missing_cols = required_cols - set(df.columns)
+            if missing_cols:
+                logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
+                raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
+            # 处理数据
+            for index, row in df.iterrows():
+                row_dict = row.to_dict()
+                # 检查所有必填列都有值
+                has_all_required = True
+                for col in required_cols:
+                    val = row_dict.get(col)
+                    if val is None or (isinstance(val, float) and pd.isna(val)):
+                        has_all_required = False
+                        break
+                if has_all_required:
+                    import_data.append({
+                        "group_id": str(row_dict["群组编号"]) if row_dict["群组编号"] is not None else "",
+                        "group_name": str(row_dict["群组名称"]) if row_dict["群组名称"] is not None else "",
+                        "teacher_id": str(row_dict["教师工号"]) if row_dict["教师工号"] is not None else "",
+                        "student_id": str(row_dict["学生学号"]) if row_dict["学生学号"] is not None else "",
+                        "student_name": str(row_dict["学生姓名"]) if row_dict["学生姓名"] is not None else ""
+                    })
+        else:
+            # 处理CSV/TSV文件
+            delimiter = '\t' if file.filename.lower().endswith('.tsv') else ','  
+            
             try:
-                text_content = content.decode('gbk')  # 尝试GBK编码
+                text_content = content.decode('utf-8-sig')  # 自动处理UTF-8 BOM
             except UnicodeDecodeError:
-                raise Exception("文件编码不支持，请使用UTF-8或GBK编码保存文件")
-        
-        lines = [line.strip() for line in text_content.split('\n') if line.strip()]
-        if not lines:
-            raise Exception("文件无有效文本内容")
-        
-        headers = [h.strip() for h in lines[0].split(delimiter) if h.strip()]
-        logger.info(f"解析到的表头: {headers}")
-        missing_cols = required_cols - set(headers)
-        if missing_cols:
-            logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
-            raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
-        
-        for line_num, line in enumerate(lines[1:], start=2):
-            row_values = [v.strip() for v in line.split(delimiter) if v.strip()]
+                try:
+                    text_content = content.decode('gbk')  # 尝试GBK编码
+                except UnicodeDecodeError:
+                    raise Exception("文件编码不支持，请使用UTF-8或GBK编码保存文件")
+            
+            lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+            if not lines:
+                raise Exception("文件无有效文本内容")
+            
+            headers = [h.strip() for h in lines[0].split(delimiter) if h.strip()]
+            logger.info(f"解析到的表头: {headers}")
+            missing_cols = required_cols - set(headers)
+            if missing_cols:
+                logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
+                raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
+            
+            for line_num, line in enumerate(lines[1:], start=2):
+                row_values = [v.strip() for v in line.split(delimiter) if v.strip()]
 
-            row_len = len(row_values)
-            header_len = len(headers)
-            if row_len != header_len:
-                logger.warning(f"第{line_num}行列数异常（表头{header_len}列，当前行{row_len}列），跳过该行")
-                continue
-            row_dict = dict(zip(headers, row_values))
+                row_len = len(row_values)
+                header_len = len(headers)
+                if row_len != header_len:
+                    logger.warning(f"第{line_num}行列数异常（表头{header_len}列，当前行{row_len}列），跳过该行")
+                    continue
+                row_dict = dict(zip(headers, row_values))
 
-            if all([row_dict.get(col) for col in required_cols]):
-                import_data.append({
-                    "group_id": row_dict["群组编号"],
-                    "group_name": row_dict["群组名称"],
-                    "teacher_id": row_dict["教师工号"],
-                    "student_id": row_dict["学生学号"],
-                    "student_name": row_dict["学生姓名"]
-                })
+                if all([row_dict.get(col) for col in required_cols]):
+                    import_data.append({
+                        "group_id": row_dict["群组编号"],
+                        "group_name": row_dict["群组名称"],
+                        "teacher_id": row_dict["教师工号"],
+                        "student_id": row_dict["学生学号"],
+                        "student_name": row_dict["学生姓名"]
+                    })
         
         # 数据清洗结果校验
         if not import_data:
@@ -1053,15 +1077,15 @@ async def remove_group_member(
 )
 async def get_group_members(
     group_id: str,
-    member_type: Optional[str] = Query(None, description="成员类型筛选：student/teacher/admin"),
+    member_type: Optional[str] = Query(None, description="成员类型筛选：student/teacher/admin/all"),
     include_inactive: bool = Query(False, description="是否包含已移除成员"),
     current_user: str = Query('{"sub": 1, "roles": ["admin"], "username": "admin"}', description="当前登录用户信息(JSON字符串)，示例: {\"sub\":1,\"roles\":[\"admin\"],\"username\":\"admin\"}")
 ):
     cu = _parse_current_user(current_user)
     roles_norm = _normalize_roles(cu.get("roles", []))
 
-    if member_type and member_type not in ["student", "teacher", "admin"]:
-        raise HTTPException(status_code=400, detail="成员类型必须是student、teacher或admin")
+    if member_type and member_type not in ["student", "teacher", "admin", "all"]:
+        raise HTTPException(status_code=400, detail="成员类型必须是student、teacher、admin或all")
 
     conn = get_connection()
     cursor = None
@@ -1089,12 +1113,11 @@ async def get_group_members(
             sql = f"""
             SELECT
                 gm.group_id,
-                gm.member_id,
                 gm.member_type,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
-                s.student_id AS account_id,
+                s.student_id,
                 s.name,
                 s.phone,
                 s.email
@@ -1110,12 +1133,11 @@ async def get_group_members(
             sql = f"""
             SELECT
                 gm.group_id,
-                gm.member_id,
                 gm.member_type,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
-                t.teacher_id AS account_id,
+                t.teacher_id,
                 t.name,
                 t.phone,
                 t.email,
@@ -1133,12 +1155,11 @@ async def get_group_members(
             sql = f"""
             SELECT
                 gm.group_id,
-                gm.member_id,
                 gm.member_type,
                 gm.joined_at,
                 gm.updated_at,
                 gm.is_active,
-                a.admin_id AS account_id,
+                a.admin_id,
                 a.name,
                 a.phone,
                 a.email,
@@ -1172,12 +1193,13 @@ async def get_group_members(
             "total": len(members),
             "members": [
                 {
-                    "member_id": m.get("member_id"),
                     "member_type": m.get("member_type"),
                     "is_active": int(m.get("is_active", 0)) if m.get("is_active") is not None else None,
                     "joined_at": _fmt_time(m.get("joined_at")),
                     "updated_at": _fmt_time(m.get("updated_at")),
-                    "account_id": m.get("account_id"),
+                    "student_id": m.get("student_id"),
+                    "teacher_id": m.get("teacher_id"),
+                    "admin_id": m.get("admin_id"),
                     "name": m.get("name"),
                     "phone": m.get("phone"),
                     "email": m.get("email"),
@@ -1187,6 +1209,94 @@ async def get_group_members(
                 }
                 for m in members
             ],
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+        conn.close()
+
+
+@router.get(
+    "/students/{student_id}/teachers",
+    summary="获取学生所在群组的老师",
+    description="通过输入 student_id 对应 students 表里的 student_id, 来返回和这个学生同一个群组的老师的 id 对应于 teachers 表里的 id(自增 id)"
+)
+async def get_student_group_teachers(
+    student_id: str,
+    current_user: Optional[str] = Query(None, description='当前登录用户信息(JSON字符串)，示例: {"sub":1,"roles":["admin"],"username":"admin"}')
+):
+    """获取学生所在群组的老师"""
+    cu = _parse_current_user(current_user)
+    
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        # 确保用户存在且身份正确
+        _ensure_caller_identity(cursor, cu)
+        
+        # 验证学生是否存在并获取内部ID
+        cursor.execute("SELECT `id` FROM `students` WHERE `student_id` = %s", (student_id,))
+        student_row = cursor.fetchone()
+        if not student_row:
+            raise HTTPException(status_code=404, detail=f"学生学号 {student_id} 不存在")
+        student_internal_id = student_row["id"] if isinstance(student_row, dict) else student_row[0]
+        
+        # 获取学生所在的群组
+        cursor.execute("""
+            SELECT DISTINCT `group_id` 
+            FROM `group_members` 
+            WHERE `member_id` = %s AND `member_type` = 'student' AND `is_active` = 1
+        """, (student_internal_id,))
+        groups = cursor.fetchall()
+        if not groups:
+            return {"student_id": student_id, "teachers": []}
+        
+        # 提取群组ID列表
+        group_ids = [g["group_id"] if isinstance(g, dict) else g[0] for g in groups]
+        
+        # 获取这些群组中的教师成员
+        placeholders = ",".join(["%s"] * len(group_ids))
+        cursor.execute(f"""
+            SELECT DISTINCT `member_id` 
+            FROM `group_members` 
+            WHERE `group_id` IN ({placeholders}) AND `member_type` = 'teacher' AND `is_active` = 1
+        """, group_ids)
+        teacher_members = cursor.fetchall()
+        
+        if not teacher_members:
+            return {"student_id": student_id, "teachers": []}
+        
+        # 提取教师内部ID列表
+        teacher_internal_ids = [t["member_id"] if isinstance(t, dict) else t[0] for t in teacher_members]
+        
+        # 获取教师信息
+        if teacher_internal_ids:
+            placeholders = ",".join(["%s"] * len(teacher_internal_ids))
+            cursor.execute(f"""
+                SELECT `id`, `teacher_id` 
+                FROM `teachers` 
+                WHERE `id` IN ({placeholders})
+            """, teacher_internal_ids)
+            teachers = cursor.fetchall()
+        else:
+            teachers = []
+        
+        # 构建返回结果
+        teacher_list = []
+        for teacher in teachers:
+            teacher_list.append({
+                "id": teacher["id"] if isinstance(teacher, dict) else teacher[0],
+                "teacher_id": teacher["teacher_id"] if isinstance(teacher, dict) else teacher[1]
+            })
+        
+        return {
+            "student_id": student_id,
+            "teachers": teacher_list
         }
     except HTTPException:
         raise
@@ -1234,6 +1344,8 @@ async def get_class_students(
             s.name as student_name,
             s.student_id as student_number,
             p.id as paper_id,
+            p.version as paper_version,
+            p.status as paper_status,
             p.updated_at as paper_update_time,
             (SELECT COUNT(*) FROM annotations WHERE paper_id = p.id) as annotation_count
         FROM
@@ -1280,6 +1392,8 @@ async def get_class_students(
                 if paper_info.get('student_id') == student_id:
                     student_info["papers"].append({
                         "paper_id": paper_id,
+                        "paper_version": paper_info.get('paper_version'),
+                        "paper_status": paper_info.get('paper_status'),
                         "paper_update_time": paper_info.get('paper_update_time').strftime("%Y-%m-%d %H:%M:%S") if paper_info.get('paper_update_time') else None,
                         "annotation_count": paper_info.get('annotation_count', 0)
                     })
@@ -1566,17 +1680,39 @@ async def selected_download_papers(
         if not papers_to_download:
             raise HTTPException(status_code=404, detail="未找到指定的论文")
         
-        # 处理论文下载（模拟实现）
-        return {
-            "format": "zip",
-            "total_papers": len(papers_to_download),
-            "papers": papers_to_download,
-            "message": f"成功准备{len(papers_to_download)}篇论文，格式为zip"
-        }
+        # 创建内存中的 zip 文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for paper in papers_to_download:
+                oss_key = paper.get('oss_key')
+                if oss_key:
+                    try:
+                        # 从 OSS 获取文件
+                        filename, content = get_file_from_oss(oss_key)
+                        # 构建文件路径，包含学生信息
+                        student_info = f"{paper.get('student_name')}_{paper.get('student_number')}"
+                        zip_file.writestr(f"{student_info}/{filename}", content)
+                    except Exception as e:
+                        logger.error(f"获取论文文件失败: {str(e)}")
+                        # 跳过失败的文件，继续处理其他文件
+        
+        # 重置文件指针到开始位置
+        zip_buffer.seek(0)
+        
+        # 返回流式响应
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename=papers_{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
+            }
+        )
     except HTTPException:
         raise
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载失败：{str(e)}")
     finally:
         if cursor:
             cursor.close()
@@ -1836,4 +1972,5 @@ def get_unuploaded_paper_members(
         if cursor:
             cursor.close()
         conn.close()
+
 
