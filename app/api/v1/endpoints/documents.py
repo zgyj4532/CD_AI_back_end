@@ -1,9 +1,10 @@
 """材料相关接口"""
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 import pymysql
 from app.database import get_db
 from app.schemas.document import MaterialResponse
-from app.services.oss import upload_attachment_to_storage
+from app.services.oss import upload_attachment_to_storage, get_file_from_oss
 import json
 from datetime import datetime
 from typing import Optional
@@ -12,6 +13,8 @@ import sys
 import tempfile
 import shutil
 import subprocess
+import io
+import zipfile
 try:
     from docx2pdf import convert as docx2pdf_convert
 except ImportError:
@@ -495,6 +498,152 @@ def list_material_names(
         }
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"数据库查询错误：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+def _parse_file_ids(file_ids_str: str) -> list[int]:
+    """解析文件ID列表"""
+    file_ids = []
+    for id_str in file_ids_str.split(","):
+        id_str = id_str.strip()
+        if id_str:
+            try:
+                file_ids.append(int(id_str))
+            except ValueError:
+                pass
+    return file_ids
+
+
+def _get_files_by_ids(cursor, file_ids: list[int]) -> list[dict]:
+    """根据文件ID列表获取文件信息"""
+    if not file_ids:
+        return []
+    
+    # 构建SQL查询
+    placeholders = ', '.join(['%s'] * len(file_ids))
+    sql = f"""
+    SELECT
+        id as file_id,
+        name as uploader_name,
+        filename,
+        storage_path
+    FROM
+        file_records
+    WHERE
+        id IN ({placeholders})
+    ORDER BY
+        upload_time DESC
+    """
+    
+    cursor.execute(sql, file_ids)
+    rows = cursor.fetchall()
+    
+    files = []
+    for row in rows:
+        files.append({
+            "file_id": row.get('file_id'),
+            "uploader_name": row.get('uploader_name'),
+            "filename": row.get('filename'),
+            "storage_path": row.get('storage_path')
+        })
+    
+    return files
+
+
+@router.post(
+    "/download",
+    summary="下载附件",
+    description="支持全选和手选下载附件，打包为zip格式"
+)
+async def download_attachments(
+    mode: str = Query(..., description="下载模式：all（全选）或selected（手选）", enum=["all", "selected"]),
+    file_ids: Optional[str] = Query(None, description="附件ID列表，用英文逗号分隔，例如: 1,2,3,4,5（手选模式时必填）"),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
+    """下载附件的实现，支持全选和手选"""
+    # 验证参数
+    if mode == "selected" and not file_ids:
+        raise HTTPException(status_code=400, detail="手选模式时必须提供附件ID列表")
+
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        attachments = []
+        
+        if mode == "all":
+            # 全选模式：获取所有附件
+            sql = """
+            SELECT
+                id as file_id,
+                name as uploader_name,
+                filename,
+                storage_path
+            FROM
+                file_records
+            ORDER BY
+                upload_time DESC
+            """
+            
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到附件")
+            
+            # 构建附件列表
+            for row in rows:
+                attachments.append({
+                    "file_id": row.get('file_id'),
+                    "uploader_name": row.get('uploader_name'),
+                    "filename": row.get('filename'),
+                    "storage_path": row.get('storage_path')
+                })
+        else:
+            # 手选模式：通过file_ids获取指定附件
+            file_id_list = _parse_file_ids(file_ids)
+            if not file_id_list:
+                raise HTTPException(status_code=400, detail="请提供有效的附件ID列表")
+            
+            # 获取附件信息
+            attachments = _get_files_by_ids(cursor, file_id_list)
+            if not attachments:
+                raise HTTPException(status_code=404, detail="未找到指定的附件")
+        
+        # 创建内存中的 zip 文件
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for attachment in attachments:
+                storage_path = attachment.get('storage_path')
+                if storage_path:
+                    try:
+                        # 从 OSS 获取文件
+                        filename, content = get_file_from_oss(storage_path)
+                        # 构建文件路径，包含上传者信息
+                        uploader_info = f"{attachment.get('uploader_name')}"
+                        zip_file.writestr(f"{uploader_info}/{filename}", content)
+                    except Exception as e:
+                        # 跳过失败的文件，继续处理其他文件
+                        pass
+        
+        # 重置文件指针到开始位置
+        zip_buffer.seek(0)
+        
+        # 返回流式响应
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename=attachments_{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
+            }
+        )
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载失败：{str(e)}")
     finally:
         if cursor:
             cursor.close()
