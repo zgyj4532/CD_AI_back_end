@@ -261,7 +261,7 @@ async def upload_paper(
         if cursor: 
             cursor.close()
 
-    return PaperOut(id=paper_id, owner_id=owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key)
+    return PaperOut(id=paper_id, owner_id=owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key, pdf_oss_key=pdf_oss_key)
 
 
 @router.put(
