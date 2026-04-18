@@ -22,7 +22,7 @@ def parse_mysql_url(url: str) -> Dict:
         raise ValueError("DATABASE_URL must start with mysql:// or mysql+pymysql://")
 
     user = parsed.username or "root"
-    password = parsed.password or "sbtwsj1002"
+    password = parsed.password or ""
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 3306
     db = parsed.path.lstrip("/") or None

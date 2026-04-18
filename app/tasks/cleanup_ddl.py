@@ -15,7 +15,7 @@ from loguru import logger
 def cleanup_expired_ddl():
     """清理过期的DDL（截止日期的后一天）"""
     logger.info("开始执行DDL清理任务")
-    
+
     conn = None
     cursor = None
     try:
@@ -74,22 +74,21 @@ def cleanup_expired_ddl():
                     "DELETE FROM ddl_management WHERE ddlid = %s",
                     (ddlid,)
                 )
-                deleted_ddl = cursor.rowcount
-                
+
                 # 提交事务
                 conn.commit()
                 
                 logger.info(f"成功清理DDL {ddlid}（教师：{teacher_name}，截止时间：{ddl_time}），删除了 {deleted_messages} 条消息")
                 
-            except Exception as e:
+            except Exception:
                 # 回滚事务
                 if conn:
                     conn.rollback()
-                logger.error(f"清理DDL {ddlid} 失败：{str(e)}")
+                logger.exception(f"清理DDL {ddlid} 失败")
                 continue
     
-    except Exception as e:
-        logger.error(f"执行DDL清理任务失败：{str(e)}")
+    except Exception:
+        logger.exception("执行DDL清理任务失败")
     finally:
         # 关闭数据库连接
         if cursor:

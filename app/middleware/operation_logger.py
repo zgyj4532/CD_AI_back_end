@@ -3,6 +3,7 @@
 用于将所有操作记录到operation_logs表中
 """
 import json
+from loguru import logger
 from app.database import get_db
 
 def record_operation_log(user_id, username, operation_type, operation_path, 
@@ -30,9 +31,9 @@ def record_operation_log(user_id, username, operation_type, operation_path,
             params_json, ip_address, status
         ))
         db.commit()
-    except Exception:
+    except Exception as exc:
         # 日志记录失败不应影响主流程
-        pass
+        logger.debug(f"记录操作日志失败: {exc}")
     finally:
         if cursor:
             cursor.close()

@@ -623,7 +623,7 @@ async def download_attachments(
                         # 构建文件路径，包含上传者信息
                         uploader_info = f"{attachment.get('uploader_name')}"
                         zip_file.writestr(f"{uploader_info}/{filename}", content)
-                    except Exception as e:
+                    except Exception:
                         # 跳过失败的文件，继续处理其他文件
                         pass
         

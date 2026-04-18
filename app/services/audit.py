@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Optional
@@ -88,8 +89,7 @@ async def submit_audit_task(
             filename = os.path.basename(oss_key)
             if not os.path.exists(oss_key):
                 raise HTTPException(status_code=404, detail=f"论文文件不存在: {oss_key}")
-            with open(oss_key, "rb") as f:
-                file_content = f.read()
+            file_content = await asyncio.to_thread(_read_file_bytes, oss_key)
         finally:
             if cursor:
                 cursor.close()
@@ -162,3 +162,8 @@ async def submit_audit_task(
                 cursor.close()
 
     return {"task_id": task_id, "status": status, "mysql_inserted": mysql_inserted}
+
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as file_handle:
+        return file_handle.read()

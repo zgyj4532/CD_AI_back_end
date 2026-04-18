@@ -36,7 +36,7 @@ def trigger_ai_review(
     # 这里将任务交给后台/任务队列
     try:
         background_tasks.add_task(submit_ai_review, paper_id, current_user)
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=503, detail="AI 服务暂时不可用")
     return {"status": "排队中", "message": "任务已加入队列"}
 
@@ -205,7 +205,7 @@ async def quick_audit(
             # 将 paper_id 添加到用户信息中，以便存储报告
             current_user["paper_id"] = paper_id
             report = submit_ai_review_file(contents, filename, current_user)
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=503, detail="AI 服务暂时不可用")
 
         return {"status": "完成", "paper_id": paper_id, "filename": filename, "report": report}

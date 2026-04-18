@@ -1,7 +1,6 @@
 """
 依赖注入
 """
-from typing import Generator
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import pymysql

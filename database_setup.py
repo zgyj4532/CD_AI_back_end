@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS `students` (
     KEY `idx_student_email` (`email`),
     KEY `idx_student_school_id` (`school_id`),
     KEY `idx_student_department_id` (`department_id`),
-    KEY `idx_student_group_id` (`group_id`),
+    KEY `idx_student_group_id` (`group_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='学生信息表';
 """
 

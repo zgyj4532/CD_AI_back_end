@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
+import asyncio
 from typing import Optional
 import aiohttp
 import os
@@ -98,8 +99,7 @@ async def submit_audit(
         elif file:
             content = await file.read()
             file_path = os.path.join(UPLOADS_DIR, file.filename)
-            with open(file_path, "wb") as f:
-                f.write(content)
+            await asyncio.to_thread(_write_uploaded_file, file_path, content)
             uploaded_file_url = f"{UPLOADS_MOUNT_PATH}/{quote(file.filename)}"
             result = await submit_audit_task(
                 db,
@@ -114,15 +114,17 @@ async def submit_audit(
             raise HTTPException(status_code=400, detail="必须提供文件或论文ID和版本号")
         
         # 插入任务记录到SQLite
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(
-            "INSERT OR REPLACE INTO tasks (id, file_path, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (task_id, file_path, status, now, now)
-        )
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO tasks (id, file_path, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (task_id, file_path, status, now, now)
+                )
+                conn.commit()
+            finally:
+                cursor.close()
         return {
             "task_id": task_id,
             "status": status,
@@ -256,6 +258,11 @@ async def download_report(task_id: int, type: str = "zip"):
         raise HTTPException(status_code=500, detail=f"Failed to download report: {str(e)}")
 
 
+def _write_uploaded_file(file_path: str, content: bytes) -> None:
+    with open(file_path, "wb") as file_handle:
+        file_handle.write(content)
+
+
 @router.get(
     "/check-permission",
     summary="检查学生智能体使用权限",
@@ -384,8 +391,7 @@ async def request_agent_permission(
                 now_str
             )
         )
-        inserted_count = 1
-        
+
         db.commit()
         cursor.close()
         
@@ -515,6 +521,7 @@ async def handle_permission_request(
                 (student_id, admin_id, admin_id)
             )
             action_message = "权限申请已拒绝，您暂时无法使用智能体功能"
+        action_label = "批准" if action == "approve" else "拒绝"
         
         # 标记消息为已读
         cursor.execute(
@@ -523,8 +530,8 @@ async def handle_permission_request(
         )
         
         # 向学生发送反馈消息
-        feedback_title = f"智能体使用权限申请{"批准" if action == "approve" else "拒绝"}"
-        feedback_content = f"亲爱的 {student_name}：\n\n您的智能体使用权限申请已{"批准" if action == "approve" else "拒绝"}。\n\n{action_message}\n\n管理员"
+        feedback_title = f"智能体使用权限申请{action_label}"
+        feedback_content = f"亲爱的 {student_name}：\n\n您的智能体使用权限申请已{action_label}。\n\n{action_message}\n\n管理员"
         
         # 生成反馈消息ID
         feedback_message_id = f"permission_feedback_{sender_id}_{int(datetime.now().timestamp() * 1000)}"
@@ -565,7 +572,7 @@ async def handle_permission_request(
         cursor.close()
         
         return {
-            "message": f"权限请求已{"批准" if action == "approve" else "拒绝"}",
+            "message": f"权限请求已{action_label}",
             "student_id": student_id,
             "student_name": student_name,
             "action": action,
