@@ -39,7 +39,17 @@ async def upload_template(
     user=Depends(admin_only),
     db: pymysql.connections.Connection = Depends(get_db)
 ):
+    # 验证文件
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
     content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    size = len(content)
+    if size > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小超过 50MB")
+    
+    # 上传文件
     key = upload_file_to_oss(file.filename, content)
     template_id = f"tpl_{uuid.uuid4().hex[:8]}"  
     
@@ -53,6 +63,7 @@ async def upload_template(
         "upload_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
+    cursor = None
     try:
         cursor = db.cursor()
         insert_sql = """
@@ -78,8 +89,9 @@ async def upload_template(
             detail=f"模板元数据存储失败：{str(e)}"
         )
     finally:
-        cursor.close()
-    return {"template_id": template_id, "oss_key": key, "storage_path": key}
+        if cursor:
+            cursor.close()
+    return {"template_id": template_id, "oss_key": key, "storage_path": key, "filename": file.filename, "content_type": file.content_type}
 
 
 @router.put(
@@ -93,9 +105,17 @@ async def update_template(
     user=Depends(admin_only),
     db: pymysql.connections.Connection = Depends(get_db)
 ):
+    # 验证文件
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="上传文件为空")
+    size = len(content)
+    if size > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小超过 50MB")
+    
+    # 上传文件
     key = upload_file_to_oss(file.filename, content)
     upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -103,6 +123,7 @@ async def update_template(
     old_key = None
     try:
         cursor = db.cursor()
+        # 检查模板是否存在
         cursor.execute("SELECT id, oss_key FROM templates WHERE template_id = %s", (template_id,))
         row = cursor.fetchone()
         if not row:
@@ -112,6 +133,7 @@ async def update_template(
         else:
             old_key = row[1] if len(row) > 1 else None
 
+        # 更新模板信息
         update_sql = """
         UPDATE templates
         SET oss_key = %s,
@@ -133,10 +155,13 @@ async def update_template(
             ),
         )
         db.commit()
+        
+        # 删除旧文件
         if old_key:
             old_path = Path(old_key)
             if old_path.is_file():
                 old_path.unlink(missing_ok=True)
+        
         return {
             "template_id": template_id,
             "oss_key": key,
@@ -147,6 +172,7 @@ async def update_template(
         }
     except pymysql.MySQLError as e:
         db.rollback()
+        # 清理新上传的文件
         new_path = Path(key)
         if new_path.is_file():
             new_path.unlink(missing_ok=True)
@@ -170,6 +196,7 @@ def delete_template(
     file_path = None
     try:
         cursor = db.cursor()
+        # 检查模板是否存在
         cursor.execute("SELECT id, oss_key FROM templates WHERE template_id = %s", (template_id,))
         row = cursor.fetchone()
         if not row:
@@ -179,13 +206,23 @@ def delete_template(
         else:
             file_path = row[1] if len(row) > 1 else None
 
+        # 删除模板记录
         cursor.execute("DELETE FROM templates WHERE template_id = %s", (template_id,))
         db.commit()
+        
+        # 删除文件
         if file_path:
             path = Path(file_path)
             if path.is_file():
                 path.unlink(missing_ok=True)
-        return {"message": "删除成功", "template_id": template_id}
+        
+        return {
+            "message": "模板删除成功",
+            "template_id": template_id,
+            "deleted_by": user.get("id"),
+            "deleted_by_username": user.get("username"),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
     except pymysql.MySQLError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"模板删除失败：{str(e)}")
@@ -207,6 +244,7 @@ def download_template(
     cursor = None
     try:
         cursor = db.cursor()
+        # 查询模板信息
         cursor.execute(
             "SELECT oss_key, filename, content_type FROM templates WHERE template_id = %s",
             (template_id,),
@@ -215,6 +253,7 @@ def download_template(
         if not row:
             raise HTTPException(status_code=404, detail="模板不存在")
 
+        # 处理查询结果
         if isinstance(row, dict):
             oss_key = row.get("oss_key")
             filename = row.get("filename") or "template"
@@ -224,13 +263,16 @@ def download_template(
             filename = row[1] or "template"
             content_type = row[2] or "application/octet-stream"
 
+        # 验证存储路径
         if not oss_key:
             raise HTTPException(status_code=500, detail="模板存储路径缺失")
 
+        # 验证文件存在
         file_path = Path(oss_key)
         if not file_path.is_file():
             raise HTTPException(status_code=404, detail="模板文件不存在")
 
+        # 返回文件
         return FileResponse(
             path=str(file_path),
             media_type=content_type,

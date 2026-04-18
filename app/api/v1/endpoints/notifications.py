@@ -754,7 +754,8 @@ def get_received_notifications(
                 "title": row[3],
                 "content": row[4],
                 "operation_time": row[7].strftime("%Y-%m-%d %H:%M:%S") if row[7] else None,
-                "sender_name": sender_name
+                "sender_name": sender_name,
+                "status": row[6]
             })
         
         # 7. 计算总页数

@@ -25,6 +25,20 @@ def parse_mysql_url(url: str) -> Dict:
 
 DEFAULT_DB_URL = settings.build_database_url()
 
+ACCOUNT_MAPPING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `account_mapping` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
+    `virtual_account` VARCHAR(128) NOT NULL COMMENT '虚拟账号，用于映射真实账号',
+    `real_user_id` BIGINT UNSIGNED NOT NULL COMMENT '真实用户ID',
+    `real_user_type` ENUM('student','teacher','admin') NOT NULL COMMENT '真实用户类型',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_virtual_account` (`virtual_account`),
+    KEY `idx_real_user` (`real_user_id`, `real_user_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='虚拟账号映射表';
+"""
+
 
 SCHOOLS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `schools` (
@@ -80,7 +94,7 @@ CREATE TABLE IF NOT EXISTS `students` (
     KEY `idx_student_email` (`email`),
     KEY `idx_student_school_id` (`school_id`),
     KEY `idx_student_department_id` (`department_id`),
-    KEY `idx_student_group_id` (`group_id`)
+    KEY `idx_student_group_id` (`group_id`),
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='学生信息表';
 """
 
@@ -108,6 +122,25 @@ CREATE TABLE IF NOT EXISTS `teachers` (
     KEY `idx_teacher_department_id` (`department_id`),
     KEY `idx_teacher_group_id` (`group_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='教师信息表';
+"""
+
+USER_AGENT_PERMISSIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `user_agent_permissions` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
+    `student_id` VARCHAR(20) NOT NULL COMMENT '学生学号（关联students表的student_id）',
+    `admin_id` VARCHAR(64) NOT NULL COMMENT '管理员ID（关联admins表的admin_id）',
+    `agent_permission` TINYINT NOT NULL DEFAULT 0 COMMENT '智能体使用权限，0-无权限，1-有权限',
+    `granted_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '赋予权限的时间',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uniq_student` (`student_id`),
+    KEY `idx_admin_id` (`admin_id`),
+    KEY `idx_agent_permission` (`agent_permission`),
+    KEY `idx_granted_at` (`granted_at`),
+    CONSTRAINT `fk_user_agent_permission_student` FOREIGN KEY (`student_id`) REFERENCES `students` (`student_id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_user_agent_permission_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins` (`admin_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户智能体使用权限表';
 """
 
 ADMINS_TABLE_SQL = """
@@ -206,7 +239,6 @@ CREATE TABLE IF NOT EXISTS `papers` (
     `id` INT NOT NULL AUTO_INCREMENT COMMENT '论文ID',
     `owner_id` INT NOT NULL COMMENT '所有者ID',
     `teacher_id` INT NOT NULL COMMENT '老师ID',
-    `teacher_name` VARCHAR(128) NOT NULL COMMENT '老师姓名', 
     `version` VARCHAR(20) NOT NULL COMMENT '当前版本号',
     `size` INT NOT NULL COMMENT '文件大小（字节）',
     `status` VARCHAR(32) NOT NULL COMMENT '状态（uploaded:已上传, processing:处理中, completed:完成, rejected:驳回）',
@@ -223,7 +255,6 @@ CREATE TABLE IF NOT EXISTS `papers` (
     PRIMARY KEY (`id`),
     KEY `idx_owner_id` (`owner_id`),
     KEY `idx_teacher_id` (`teacher_id`),
-    KEY `idx_teacher_name` (`teacher_name`),
     KEY `idx_version` (`version`),
     KEY `idx_status` (`status`),
     KEY `idx_operated_time` (`operated_time`)
@@ -248,7 +279,6 @@ PAPERS_HISTORY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `papers_history` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '历史版本ID',
     `paper_id` INT NOT NULL COMMENT '论文ID',
-    `teacher_name` VARCHAR(128) NOT NULL COMMENT '老师姓名',
     `version` VARCHAR(20) NOT NULL COMMENT '历史版本号',
     `size` INT NOT NULL COMMENT '文件大小（字节）',
     `status` VARCHAR(32) NOT NULL COMMENT '状态（如uploaded, processing, completed等）',
@@ -264,7 +294,6 @@ CREATE TABLE IF NOT EXISTS `papers_history` (
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     PRIMARY KEY (`id`),
     KEY `idx_papers_history_paper_id` (`paper_id`),
-    KEY `idx_papers_history_teacher_name` (`teacher_name`),
     KEY `idx_papers_history_version` (`version`),
     KEY `idx_papers_history_status` (`status`),
     KEY `idx_papers_history_created_at` (`created_at`),
@@ -424,6 +453,7 @@ def init_db(database_url: str | None = None) -> None:
                 STUDENTS_TABLE_SQL,
                 TEACHERS_TABLE_SQL,
                 ADMINS_TABLE_SQL,
+                USER_AGENT_PERMISSIONS_TABLE_SQL,
                 FILE_RECORDS_TABLE_SQL,
                 GROUPS_TABLE_SQL,
                 GROUP_MEMBERS_TABLE_SQL,
@@ -537,6 +567,7 @@ TABLE_COLUMN_DEFINITIONS = {
         "storage_path": "`storage_path` VARCHAR(500) NOT NULL COMMENT '文件存储地址'",
         "file_type": "`file_type` ENUM('document', 'essay') NOT NULL DEFAULT 'document' COMMENT '文件类型：document(文档)或essay(文章)'",
         "version": "`version` INT NOT NULL DEFAULT 1 COMMENT '版本号'",
+        "paper_id": "`paper_id` INT DEFAULT NULL COMMENT '关联的论文ID'",
         "remark": "`remark` TEXT COMMENT '备注'",
         "created_at": "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间'",
         "updated_at": "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间'",
@@ -719,7 +750,8 @@ TABLE_INDEX_DEFINITIONS = {
         "CREATE INDEX idx_uploader_id ON `file_records` (uploader_id)",
         "CREATE INDEX idx_filename ON `file_records` (filename)",
         "CREATE INDEX idx_upload_time ON `file_records` (upload_time)",
-        "CREATE INDEX idx_file_type ON `file_records` (file_type)"
+        "CREATE INDEX idx_file_type ON `file_records` (file_type)",
+        "CREATE INDEX idx_paper_id ON `file_records` (paper_id)"
     ],
     "groups": [
         "CREATE UNIQUE INDEX uniq_group_id ON `groups` (group_id)",
@@ -805,6 +837,7 @@ def sync_schema(database_url: str | None = None) -> None:
                 STUDENTS_TABLE_SQL,
                 TEACHERS_TABLE_SQL,
                 ADMINS_TABLE_SQL,
+                USER_AGENT_PERMISSIONS_TABLE_SQL,
                 FILE_RECORDS_TABLE_SQL,
                 GROUPS_TABLE_SQL,
                 GROUP_MEMBERS_TABLE_SQL,

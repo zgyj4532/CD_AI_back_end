@@ -767,18 +767,27 @@ def submit_paper_review(
                 status_code=400,
                 detail=f"论文ID {paper_id} 已存在审阅记录（ID：{existing_review[0]}），如需修改请使用更新审阅接口"
             )
+        
+        # 获取教师姓名
+        cursor.execute("SELECT name FROM teachers WHERE id = %s", (login_user_id,))
+        teacher_row = cursor.fetchone()
+        if not teacher_row:
+            raise HTTPException(status_code=404, detail=f"教师ID {login_user_id} 不存在")
+        teacher_name = teacher_row[0]
+        
         now = datetime.now()
         review_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
         insert_sql = """
         INSERT INTO paper_reviews (
-            paper_id, teacher_id, review_content, review_time, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s)
+            paper_id, teacher_id, teacher_name, review_content, review_time, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute(
             insert_sql,
             (
                 paper_id,
                 login_user_id,
+                teacher_name,
                 review_content,
                 review_time_str,
                 review_time_str,

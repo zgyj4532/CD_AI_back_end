@@ -85,7 +85,7 @@ def convert_docx_to_pdf(docx_content: bytes, filename: str) -> tuple:
     except Exception as e:
         raise HTTPException(
             status_code=500,
-             detail=f"DOCX转PDF失败：{str(e)}。请确保已安装转换工具（Linux推荐安装LibreOffice）"
+            detail=f"DOCX转PDF失败：{str(e)}。请确保已安装转换工具（Linux推荐安装LibreOffice）"
         )
 
 def _parse_current_user(current_user: Optional[str]) -> dict:
@@ -279,7 +279,7 @@ async def update_material(
             status_code=403, 
             detail=f"无权限更新：登录用户名[{login_username}]与传入的username[{name}]不一致"
         )
-        # 验证 paper_id 是否存在于 papers 表中（如果提供了的话）
+    # 验证 paper_id 是否存在于 papers 表中（如果提供了的话）
     if paper_id is not None:
         cursor = None
         try:
