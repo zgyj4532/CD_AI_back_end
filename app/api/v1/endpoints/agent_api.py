@@ -586,3 +586,73 @@ async def handle_permission_request(
         raise HTTPException(status_code=500, detail=f"数据库操作失败：{str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"处理权限请求失败：{str(e)}")
+
+
+@router.get(
+    "/agent-permission-requests",
+    summary="查询智能体权限申请消息",
+    description="管理员查询所有发送给她的智能体使用权限申请和审批消息"
+)
+async def get_agent_permission_requests(
+    admin_id: str = Query(..., description="管理员ID（字符串格式，如 admin1）"),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
+    cursor = None
+    try:
+        cursor = db.cursor()
+        
+        # 验证管理员是否存在
+        cursor.execute("SELECT admin_id, name FROM admins WHERE admin_id = %s", (admin_id,))
+        admin = cursor.fetchone()
+        if not admin:
+            raise HTTPException(status_code=404, detail="管理员不存在")
+        
+        admin_name = admin[1] if len(admin) > 1 else None
+        
+        # 查询该管理员的所有智能体权限申请和审批消息
+        cursor.execute(
+            """
+            SELECT id, user_id, username, title, content, source, status, 
+                   received_time, metadata, created_at, updated_at
+            FROM user_messages 
+            WHERE user_id = %s 
+              AND title IN ('智能体使用权限申请', '智能体使用权限申请批准')
+            ORDER BY received_time DESC
+            """,
+            (admin_id,)
+        )
+        messages = cursor.fetchall()
+        
+        # 格式化返回数据
+        items = []
+        for msg in messages:
+            items.append({
+                "id": msg[0],
+                "user_id": msg[1],
+                "username": msg[2],
+                "title": msg[3],
+                "content": msg[4],
+                "source": msg[5],
+                "status": msg[6],
+                "received_time": msg[7].strftime("%Y-%m-%d %H:%M:%S") if msg[7] else None,
+                "metadata": json.loads(msg[8]) if msg[8] else {},
+                "created_at": msg[9].strftime("%Y-%m-%d %H:%M:%S") if msg[9] else None,
+                "updated_at": msg[10].strftime("%Y-%m-%d %H:%M:%S") if msg[10] else None
+            })
+        
+        return {
+            "admin_id": admin_id,
+            "admin_name": admin_name,
+            "total": len(items),
+            "messages": items
+        }
+        
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库操作失败：{str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询权限申请消息失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
