@@ -1016,22 +1016,39 @@ async def remove_group_member(
         _require_group_exists(cursor, group_id)
         _require_group_teacher_or_admin(cursor, cu, group_id, "只有教师或管理员可移除成员")
 
+        # normalize input values
+        if student_id is not None:
+            student_id = student_id.strip()
+        if teacher_id is not None:
+            teacher_id = teacher_id.strip()
+        if admin_id is not None:
+            admin_id = admin_id.strip()
+
         # 获取成员内部ID
         if member_type == "student":
             cursor.execute("SELECT `id` FROM `students` WHERE `student_id` = %s", (student_id,))
             member_row = cursor.fetchone()
+            if not member_row and student_id and student_id.isdigit():
+                cursor.execute("SELECT `id` FROM `students` WHERE `id` = %s", (student_id,))
+                member_row = cursor.fetchone()
             if not member_row:
                 raise HTTPException(status_code=404, detail=f"学生学号 {student_id} 不存在")
             member_id = member_row[0]
         elif member_type == "teacher":
             cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (teacher_id,))
             member_row = cursor.fetchone()
+            if not member_row and teacher_id and teacher_id.isdigit():
+                cursor.execute("SELECT `id` FROM `teachers` WHERE `id` = %s", (teacher_id,))
+                member_row = cursor.fetchone()
             if not member_row:
                 raise HTTPException(status_code=404, detail=f"教师工号 {teacher_id} 不存在")
             member_id = member_row[0]
         else:  # admin
             cursor.execute("SELECT `id` FROM `admins` WHERE `admin_id` = %s", (admin_id,))
             member_row = cursor.fetchone()
+            if not member_row and admin_id and admin_id.isdigit():
+                cursor.execute("SELECT `id` FROM `admins` WHERE `id` = %s", (admin_id,))
+                member_row = cursor.fetchone()
             if not member_row:
                 raise HTTPException(status_code=404, detail=f"管理员账号 {admin_id} 不存在")
             member_id = member_row[0]
