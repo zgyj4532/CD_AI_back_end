@@ -429,8 +429,13 @@ async def import_groups(
                         has_all_required = False
                         break
                 if has_all_required:
+                    group_id_str = str(row_dict["群组编号"]) if row_dict["群组编号"] is not None else ""
+                    # 验证群组编号只能是数字
+                    if not group_id_str.isdigit():
+                        logger.warning(f"第{index+2}行群组编号 {group_id_str} 包含非数字字符，跳过该行")
+                        continue
                     import_data.append({
-                        "group_id": str(row_dict["群组编号"]) if row_dict["群组编号"] is not None else "",
+                        "group_id": group_id_str,
                         "group_name": str(row_dict["群组名称"]) if row_dict["群组名称"] is not None else "",
                         "teacher_id": str(row_dict["教师工号"]) if row_dict["教师工号"] is not None else "",
                         "student_id": str(row_dict["学生学号"]) if row_dict["学生学号"] is not None else "",
@@ -470,8 +475,13 @@ async def import_groups(
                 row_dict = dict(zip(headers, row_values))
 
                 if all([row_dict.get(col) for col in required_cols]):
+                    group_id_str = row_dict["群组编号"]
+                    # 验证群组编号只能是数字
+                    if not group_id_str.isdigit():
+                        logger.warning(f"第{line_num}行群组编号 {group_id_str} 包含非数字字符，跳过该行")
+                        continue
                     import_data.append({
-                        "group_id": row_dict["群组编号"],
+                        "group_id": group_id_str,
                         "group_name": row_dict["群组名称"],
                         "teacher_id": row_dict["教师工号"],
                         "student_id": row_dict["学生学号"],
@@ -591,7 +601,12 @@ async def create_group(
         _ensure_caller_identity(cursor, cu)
 
         group_id_value = (group_id or "").strip() or None
-        if not group_id_value:
+        if group_id_value:
+            # 验证群组编号只能是数字
+            if not group_id_value.isdigit():
+                raise HTTPException(status_code=400, detail="群组编号只能包含数字")
+        else:
+            # 自动生成群组编号
             cursor.execute(
                 "SELECT MAX(CAST(`group_id` AS UNSIGNED)) FROM `groups` WHERE `group_id` REGEXP '^[0-9]+$'"
             )
@@ -1958,5 +1973,3 @@ def get_unuploaded_paper_members(
         if cursor:
             cursor.close()
         conn.close()
-
-
