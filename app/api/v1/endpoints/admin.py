@@ -485,8 +485,8 @@ def calculate_total_teachers(
 
 @router.get(
     "/stats/papers/uploaded/total",
-    summary="计算总已上传论文数",
-    description="统计论文表中状态为「已上传」的论文总数（仅管理员可访问）"
+    summary="计算总待审阅论文数",
+    description="统计论文表中状态为「待审阅」的论文总数（仅管理员可访问）"
 )
 def calculate_total_uploaded_papers(
     user=Depends(admin_only),
@@ -495,42 +495,11 @@ def calculate_total_uploaded_papers(
     cursor = None
     try:
         cursor = db.cursor()
-        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '已上传';"
+        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '待审阅'and'已更新';"
         cursor.execute(count_sql)
         total_uploaded = cursor.fetchone()[0]
         return {
             "total_uploaded_papers": total_uploaded,
-            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "code": 200,
-            "message": "已上传论文数统计成功"
-        }
-    except pymysql.MySQLError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"计算已上传论文数失败：{str(e)}"
-        )
-    finally:
-        if cursor:
-            cursor.close()
-
-
-@router.get(
-    "/stats/papers/unreviewed/total",
-    summary="计算总待审阅论文数",
-    description="统计论文表中状态为「待审阅」的论文总数（仅管理员可访问）"
-)
-def calculate_total_unreviewed_papers(
-    user=Depends(admin_only),
-    db: pymysql.connections.Connection = Depends(get_db)
-):
-    cursor = None
-    try:
-        cursor = db.cursor()
-        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '待审阅';"
-        cursor.execute(count_sql)
-        total_unreviewed = cursor.fetchone()[0]
-        return {
-            "total_unreviewed_papers": total_unreviewed,
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "code": 200,
             "message": "待审阅论文数统计成功"
@@ -546,9 +515,40 @@ def calculate_total_unreviewed_papers(
 
 
 @router.get(
+    "/stats/papers/unreviewed/total",
+    summary="计算总待修改论文数",
+    description="统计论文表中状态为「待修改」的论文总数（仅管理员可访问）"
+)
+def calculate_total_unreviewed_papers(
+    user=Depends(admin_only),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
+    cursor = None
+    try:
+        cursor = db.cursor()
+        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '已审阅'and'待更新';"
+        cursor.execute(count_sql)
+        total_unreviewed = cursor.fetchone()[0]
+        return {
+            "total_unreviewed_papers": total_unreviewed,
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "code": 200,
+            "message": "待修改论文数统计成功"
+        }
+    except pymysql.MySQLError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"计算待修改论文数失败：{str(e)}"
+        )
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.get(
     "/stats/papers/updated/total",
-    summary="计算总已更新论文数",
-    description="统计论文表中状态为「已更新」的论文总数（仅管理员可访问）"
+    summary="计算总已定稿论文数",
+    description="统计论文表中状态为「已定稿」的论文总数（仅管理员可访问）"
 )
 def calculate_total_updated_papers(
     user=Depends(admin_only),
@@ -557,19 +557,19 @@ def calculate_total_updated_papers(
     cursor = None
     try:
         cursor = db.cursor()
-        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '已更新';"
+        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '已定稿';"
         cursor.execute(count_sql)
         total_updated = cursor.fetchone()[0]
         return {
             "total_updated_papers": total_updated,
             "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "code": 200,
-            "message": "已更新论文数统计成功"
+            "message": "已定稿论文数统计成功"
         }
     except pymysql.MySQLError as e:
         raise HTTPException(
             status_code=500,
-            detail=f"计算已更新论文数失败：{str(e)}"
+            detail=f"计算已定稿论文数失败：{str(e)}"
         )
     finally:
         if cursor:
