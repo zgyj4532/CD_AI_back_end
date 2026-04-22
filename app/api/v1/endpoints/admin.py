@@ -495,7 +495,7 @@ def calculate_total_uploaded_papers(
     cursor = None
     try:
         cursor = db.cursor()
-        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '待审阅'and'已更新';"
+        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '待审阅' OR status = '已更新';"
         cursor.execute(count_sql)
         total_uploaded = cursor.fetchone()[0]
         return {
@@ -527,6 +527,7 @@ def calculate_total_unreviewed_papers(
     try:
         cursor = db.cursor()
         count_sql = "SELECT COUNT(*) FROM papers WHERE status = '已审阅'and'待更新';"
+        count_sql = "SELECT COUNT(*) FROM papers WHERE status = '已审阅' OR status = '待更新';"
         cursor.execute(count_sql)
         total_unreviewed = cursor.fetchone()[0]
         return {

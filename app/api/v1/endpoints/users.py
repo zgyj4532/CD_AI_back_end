@@ -1669,7 +1669,7 @@ async def import_users(file: UploadFile = File(...), db: pymysql.connections.Con
             info = USER_TABLES[user_type]
             table = info["table"]
             email = "string"
-            full_name = (row.get("full_name") or None) and row.get("full_name").strip()
+            full_name = safe_get_str("全名")
             password = (row.get("password") or default_password).strip() or default_password
             password_hash = get_password_hash(password)
             if not full_name:
