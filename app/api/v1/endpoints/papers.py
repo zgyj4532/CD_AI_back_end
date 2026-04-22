@@ -1367,12 +1367,11 @@ def create_ddl(
 
 @router.get(
     "/ddl/list",
-    response_model=List[DDLOut],
     summary="查看DDL列表",
-    description="教师可查看自己创建的所有DDL，管理员可查看所有DDL"
+    description="根据群组ID查询对应的DDL截止时间"
 )
 def list_ddl(
-    teacher_id: int = Query(..., description="教师ID（查询该教师创建的DDL）"),
+    group_id: int = Query(..., description="群组ID（查询该群组的DDL）"),
     db: pymysql.connections.Connection = Depends(get_db),
     current_user: Optional[str] = Query(None, description="登录用户信息(JSON字符串，包含 sub/username/roles)"),
 ):
@@ -1382,26 +1381,19 @@ def list_ddl(
     # 基础校验
     if login_user_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录后再操作")
-    if not isinstance(teacher_id, int) or teacher_id <= 0:
-        raise HTTPException(status_code=400, detail="teacher_id必须是正整数")
-    # 权限校验
-    is_admin = "admin" in login_user_roles or "管理员" in login_user_roles
-    if teacher_id != login_user_id and not is_admin:
-        raise HTTPException(
-            status_code=403,
-            detail=f"无权限查看：仅可查看自己创建的DDL或管理员查看，传入的teacher_id({teacher_id})与登录用户ID({login_user_id})不一致"
-        )
+    if not isinstance(group_id, int) or group_id <= 0:
+        raise HTTPException(status_code=400, detail="group_id必须是正整数")
     # 数据库查询
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
         query_sql = """
-        SELECT ddlid, teacher_id, teacher_name, ddl_time, created_at, updated_at
+        SELECT ddlid, teacher_id, teacher_name, group_id, ddl_time, created_at, updated_at
         FROM ddl_management 
-        WHERE teacher_id = %s 
+        WHERE group_id = %s 
         ORDER BY ddl_time DESC
         """
-        cursor.execute(query_sql, (teacher_id,))
+        cursor.execute(query_sql, (group_id,))
         ddl_records = cursor.fetchall()
         result = []
         for record in ddl_records:
@@ -1409,13 +1401,14 @@ def list_ddl(
             ddl_time_str = record["ddl_time"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["ddl_time"], datetime) else record["ddl_time"]
             created_at_str = record["created_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(record["created_at"], datetime) else record["created_at"]
             
-            result.append(DDLOut(
-                ddlid=record["ddlid"],
-                creator_id=record["teacher_id"],
-                teacher_id=record["teacher_id"],
-                ddl_time=ddl_time_str,
-                created_at=created_at_str
-            ))
+            result.append({
+                "ddlid": record["ddlid"],
+                "teacher_id": record["teacher_id"],
+                "teacher_name": record["teacher_name"],
+                "group_id": record["group_id"],
+                "ddl_time": ddl_time_str,
+                "created_at": created_at_str
+            })
         return result
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"查询DDL失败：{str(e)}")
