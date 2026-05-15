@@ -396,7 +396,6 @@ async def import_groups(
     # 数据解析
     try:
         import_data = []
-        required_cols = {"群组编号", "群组名称", "教师工号", "教师姓名", "学生学号", "学生姓名"}
         
         # 处理不同文件类型
         if file.filename.lower().endswith('.xlsx'):
@@ -404,35 +403,37 @@ async def import_groups(
             df = pd.read_excel(io.BytesIO(content))
             # 转换列名
             df.columns = [col.strip() for col in df.columns]
-            # 检查必填列
-            missing_cols = required_cols - set(df.columns)
-            if missing_cols:
-                logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
-                raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
             # 处理数据
             for index, row in df.iterrows():
                 row_dict = row.to_dict()
-                # 检查所有必填列都有值
-                has_all_required = True
-                for col in required_cols:
-                    val = row_dict.get(col)
-                    if val is None or (isinstance(val, float) and pd.isna(val)):
-                        has_all_required = False
-                        break
-                if has_all_required:
-                    group_id_str = str(row_dict["群组编号"]) if row_dict["群组编号"] is not None else ""
-                    # 验证群组编号只能是数字
-                    if not group_id_str.isdigit():
-                        logger.warning(f"第{index+2}行群组编号 {group_id_str} 包含非数字字符，跳过该行")
-                        continue
-                    import_data.append({
-                        "group_id": group_id_str,
-                        "group_name": str(row_dict["群组名称"]) if row_dict["群组名称"] is not None else "",
-                        "teacher_id": str(row_dict["教师工号"]) if row_dict["教师工号"] is not None else "",
-                        "teacher_name": str(row_dict["教师姓名"]) if row_dict["教师姓名"] is not None else "",
-                        "student_id": str(row_dict["学生学号"]) if row_dict["学生学号"] is not None else "",
-                        "student_name": str(row_dict["学生姓名"]) if row_dict["学生姓名"] is not None else ""
-                    })
+                # 识别列名：学号、姓名、指导教师工号、指导教师姓名
+                student_id = str(row_dict.get("学号", "")).strip()
+                student_name = str(row_dict.get("姓名", "")).strip()
+                teacher_id = str(row_dict.get("指导教师工号", "")).strip()
+                teacher_name = str(row_dict.get("指导教师姓名", "")).strip()
+                
+                # 检查必填字段
+                if not student_id or not student_name or not teacher_id or not teacher_name:
+                    logger.warning(f"第{index+2}行缺少必填字段（学号、姓名、指导教师工号、指导教师姓名），跳过该行")
+                    continue
+                
+                # 自动在教师工号前加上前缀 "t"
+                if teacher_id and not teacher_id.startswith("t"):
+                    teacher_id = "t" + teacher_id
+                
+                # 使用指导教师工号作为群组编号
+                group_id_str = teacher_id
+                # 使用教师姓名+老师作为群组名称
+                group_name = f"{teacher_name}老师"
+                
+                import_data.append({
+                    "group_id": group_id_str,
+                    "group_name": group_name,
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher_name,
+                    "student_id": student_id,
+                    "student_name": student_name
+                })
         else:
             # 处理CSV/TSV文件
             delimiter = '\t' if file.filename.lower().endswith('.tsv') else ','  
@@ -451,35 +452,53 @@ async def import_groups(
             
             headers = [h.strip() for h in lines[0].split(delimiter) if h.strip()]
             logger.info(f"解析到的表头: {headers}")
-            missing_cols = required_cols - set(headers)
-            if missing_cols:
-                logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
-                raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
+            
+            # 查找列索引
+            student_id_idx = headers.index("学号") if "学号" in headers else -1
+            student_name_idx = headers.index("姓名") if "姓名" in headers else -1
+            teacher_id_idx = headers.index("指导教师工号") if "指导教师工号" in headers else -1
+            teacher_name_idx = headers.index("指导教师姓名") if "指导教师姓名" in headers else -1
+            
+            # 检查必填列是否存在
+            if student_id_idx == -1 or student_name_idx == -1 or teacher_id_idx == -1 or teacher_name_idx == -1:
+                logger.error(f"用户{current_user['username']}上传文件缺少必填列：学号、姓名、指导教师工号、指导教师姓名")
+                raise HTTPException(status_code=400, detail="文件缺少必填列：学号、姓名、指导教师工号、指导教师姓名")
             
             for line_num, line in enumerate(lines[1:], start=2):
-                row_values = [v.strip() for v in line.split(delimiter) if v.strip()]
+                row_values = [v.strip() for v in line.split(delimiter)]
 
-                row_len = len(row_values)
-                header_len = len(headers)
-                if row_len != header_len:
-                    logger.warning(f"第{line_num}行列数异常（表头{header_len}列，当前行{row_len}列），跳过该行")
+                # 检查行数据是否足够
+                if len(row_values) <= max(student_id_idx, student_name_idx, teacher_id_idx, teacher_name_idx):
+                    logger.warning(f"第{line_num}行列数不足，跳过该行")
                     continue
-                row_dict = dict(zip(headers, row_values))
-
-                if all([row_dict.get(col) for col in required_cols]):
-                    group_id_str = row_dict["群组编号"]
-                    # 验证群组编号只能是数字
-                    if not group_id_str.isdigit():
-                        logger.warning(f"第{line_num}行群组编号 {group_id_str} 包含非数字字符，跳过该行")
-                        continue
-                    import_data.append({
-                        "group_id": group_id_str,
-                        "group_name": row_dict["群组名称"],
-                        "teacher_id": row_dict["教师工号"],
-                        "teacher_name": row_dict["教师姓名"],
-                        "student_id": row_dict["学生学号"],
-                        "student_name": row_dict["学生姓名"]
-                    })
+                
+                student_id = row_values[student_id_idx]
+                student_name = row_values[student_name_idx]
+                teacher_id = row_values[teacher_id_idx]
+                teacher_name = row_values[teacher_name_idx]
+                
+                # 检查必填字段
+                if not student_id or not student_name or not teacher_id or not teacher_name:
+                    logger.warning(f"第{line_num}行缺少必填字段，跳过该行")
+                    continue
+                
+                # 自动在教师工号前加上前缀 "t"
+                if teacher_id and not teacher_id.startswith("t"):
+                    teacher_id = "t" + teacher_id
+                
+                # 使用指导教师工号作为群组编号
+                group_id_str = teacher_id
+                # 使用教师姓名+老师作为群组名称
+                group_name = f"{teacher_name}老师"
+                
+                import_data.append({
+                    "group_id": group_id_str,
+                    "group_name": group_name,
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher_name,
+                    "student_id": student_id,
+                    "student_name": student_name
+                })
         
         # 数据清洗结果校验
         if not import_data:
@@ -644,7 +663,6 @@ async def validate_teachers_students(
     # 数据解析
     try:
         import_data = []
-        required_cols = {"群组编号", "群组名称", "教师工号", "教师姓名", "学生学号", "学生姓名"}
         
         # 处理不同文件类型
         if file.filename.lower().endswith('.xlsx'):
@@ -652,35 +670,37 @@ async def validate_teachers_students(
             df = pd.read_excel(io.BytesIO(content))
             # 转换列名
             df.columns = [col.strip() for col in df.columns]
-            # 检查必填列
-            missing_cols = required_cols - set(df.columns)
-            if missing_cols:
-                logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
-                raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
             # 处理数据
             for index, row in df.iterrows():
                 row_dict = row.to_dict()
-                # 检查所有必填列都有值
-                has_all_required = True
-                for col in required_cols:
-                    val = row_dict.get(col)
-                    if val is None or (isinstance(val, float) and pd.isna(val)):
-                        has_all_required = False
-                        break
-                if has_all_required:
-                    group_id_str = str(row_dict["群组编号"]) if row_dict["群组编号"] is not None else ""
-                    # 验证群组编号只能是数字
-                    if not group_id_str.isdigit():
-                        logger.warning(f"第{index+2}行群组编号 {group_id_str} 包含非数字字符，跳过该行")
-                        continue
-                    import_data.append({
-                        "group_id": group_id_str,
-                        "group_name": str(row_dict["群组名称"]) if row_dict["群组名称"] is not None else "",
-                        "teacher_id": str(row_dict["教师工号"]) if row_dict["教师工号"] is not None else "",
-                        "teacher_name": str(row_dict["教师姓名"]) if row_dict["教师姓名"] is not None else "",
-                        "student_id": str(row_dict["学生学号"]) if row_dict["学生学号"] is not None else "",
-                        "student_name": str(row_dict["学生姓名"]) if row_dict["学生姓名"] is not None else ""
-                    })
+                # 识别列名：学号、姓名、指导教师工号、指导教师姓名
+                student_id = str(row_dict.get("学号", "")).strip()
+                student_name = str(row_dict.get("姓名", "")).strip()
+                teacher_id = str(row_dict.get("指导教师工号", "")).strip()
+                teacher_name = str(row_dict.get("指导教师姓名", "")).strip()
+                
+                # 检查必填字段
+                if not student_id or not student_name or not teacher_id or not teacher_name:
+                    logger.warning(f"第{index+2}行缺少必填字段（学号、姓名、指导教师工号、指导教师姓名），跳过该行")
+                    continue
+                
+                # 自动在教师工号前加上前缀 "t"
+                if teacher_id and not teacher_id.startswith("t"):
+                    teacher_id = "t" + teacher_id
+                
+                # 使用指导教师工号作为群组编号
+                group_id_str = teacher_id
+                # 使用教师姓名+老师作为群组名称
+                group_name = f"{teacher_name}老师"
+                
+                import_data.append({
+                    "group_id": group_id_str,
+                    "group_name": group_name,
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher_name,
+                    "student_id": student_id,
+                    "student_name": student_name
+                })
         else:
             # 处理CSV/TSV文件
             delimiter = '\t' if file.filename.lower().endswith('.tsv') else ','  
@@ -699,35 +719,53 @@ async def validate_teachers_students(
             
             headers = [h.strip() for h in lines[0].split(delimiter) if h.strip()]
             logger.info(f"解析到的表头: {headers}")
-            missing_cols = required_cols - set(headers)
-            if missing_cols:
-                logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
-                raise HTTPException(status_code=400, detail=f"文件缺少必填列：{', '.join(missing_cols)}")
+            
+            # 查找列索引
+            student_id_idx = headers.index("学号") if "学号" in headers else -1
+            student_name_idx = headers.index("姓名") if "姓名" in headers else -1
+            teacher_id_idx = headers.index("指导教师工号") if "指导教师工号" in headers else -1
+            teacher_name_idx = headers.index("指导教师姓名") if "指导教师姓名" in headers else -1
+            
+            # 检查必填列是否存在
+            if student_id_idx == -1 or student_name_idx == -1 or teacher_id_idx == -1 or teacher_name_idx == -1:
+                logger.error(f"用户{current_user['username']}上传文件缺少必填列：学号、姓名、指导教师工号、指导教师姓名")
+                raise HTTPException(status_code=400, detail="文件缺少必填列：学号、姓名、指导教师工号、指导教师姓名")
             
             for line_num, line in enumerate(lines[1:], start=2):
-                row_values = [v.strip() for v in line.split(delimiter) if v.strip()]
+                row_values = [v.strip() for v in line.split(delimiter)]
 
-                row_len = len(row_values)
-                header_len = len(headers)
-                if row_len != header_len:
-                    logger.warning(f"第{line_num}行列数异常（表头{header_len}列，当前行{row_len}列），跳过该行")
+                # 检查行数据是否足够
+                if len(row_values) <= max(student_id_idx, student_name_idx, teacher_id_idx, teacher_name_idx):
+                    logger.warning(f"第{line_num}行列数不足，跳过该行")
                     continue
-                row_dict = dict(zip(headers, row_values))
-
-                if all([row_dict.get(col) for col in required_cols]):
-                    group_id_str = row_dict["群组编号"]
-                    # 验证群组编号只能是数字
-                    if not group_id_str.isdigit():
-                        logger.warning(f"第{line_num}行群组编号 {group_id_str} 包含非数字字符，跳过该行")
-                        continue
-                    import_data.append({
-                        "group_id": group_id_str,
-                        "group_name": row_dict["群组名称"],
-                        "teacher_id": row_dict["教师工号"],
-                        "teacher_name": row_dict["教师姓名"],
-                        "student_id": row_dict["学生学号"],
-                        "student_name": row_dict["学生姓名"]
-                    })
+                
+                student_id = row_values[student_id_idx]
+                student_name = row_values[student_name_idx]
+                teacher_id = row_values[teacher_id_idx]
+                teacher_name = row_values[teacher_name_idx]
+                
+                # 检查必填字段
+                if not student_id or not student_name or not teacher_id or not teacher_name:
+                    logger.warning(f"第{line_num}行缺少必填字段，跳过该行")
+                    continue
+                
+                # 自动在教师工号前加上前缀 "t"
+                if teacher_id and not teacher_id.startswith("t"):
+                    teacher_id = "t" + teacher_id
+                
+                # 使用指导教师工号作为群组编号
+                group_id_str = teacher_id
+                # 使用教师姓名+老师作为群组名称
+                group_name = f"{teacher_name}老师"
+                
+                import_data.append({
+                    "group_id": group_id_str,
+                    "group_name": group_name,
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher_name,
+                    "student_id": student_id,
+                    "student_name": student_name
+                })
         
         # 数据清洗结果校验
         if not import_data:

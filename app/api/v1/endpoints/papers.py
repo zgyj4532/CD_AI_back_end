@@ -83,6 +83,30 @@ def _parse_version(version_str: str) -> tuple:
         )
 
 
+def _column_exists(cursor, table_name: str, column_name: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+        (table_name, column_name),
+    )
+    return cursor.fetchone() is not None
+
+
+def _resolve_teacher_name(cursor, teacher_id: str) -> str:
+    if not teacher_id:
+        return ""
+    cursor.execute("SELECT name FROM teachers WHERE teacher_id = %s", (teacher_id,))
+    row = cursor.fetchone()
+    if row and row[0]:
+        return row[0]
+    if teacher_id.isdigit():
+        cursor.execute("SELECT name FROM teachers WHERE id = %s", (int(teacher_id),))
+        row = cursor.fetchone()
+        if row and row[0]:
+            return row[0]
+    return teacher_id or ""
+
+
 def _find_soffice_binary() -> Optional[str]:
     for cmd in ("soffice", "libreoffice"):
         path = shutil.which(cmd)
@@ -182,6 +206,8 @@ async def upload_paper(
         cursor.execute("SELECT id FROM papers WHERE owner_id = %s", (owner_id,))
         if cursor.fetchone():
             raise HTTPException(status_code=400, detail="每个学生只能上传一篇论文")
+        teacher_name = _resolve_teacher_name(cursor, teacher_id)
+        has_teacher_name = _column_exists(cursor, "papers", "teacher_name")
     finally:
         if cursor:
             cursor.close()
@@ -209,16 +235,38 @@ async def upload_paper(
         submitter_role = ",".join([str(r) for r in roles]) if isinstance(roles, list) else str(roles)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         version = "v1.0"
-        paper_sql = """
-        INSERT INTO papers (
-            owner_id, teacher_id, version, size, status, ddl, oss_key, pdf_oss_key,
-            submitted_by_name, submitted_by_role, created_at, updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        cursor.execute(
-            paper_sql,
-            (
+        if has_teacher_name:
+            paper_sql = """
+            INSERT INTO papers (
+                owner_id, teacher_id, teacher_name, version, size, status, ddl, oss_key, pdf_oss_key,
+                submitted_by_name, submitted_by_role, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            paper_values = (
+                owner_id,
+                teacher_id,
+                teacher_name,
+                version,
+                size,
+                "已上传",
+                None,
+                oss_key,
+                pdf_oss_key,
+                submitter_name,
+                submitter_role,
+                now,
+                now,
+            )
+        else:
+            paper_sql = """
+            INSERT INTO papers (
+                owner_id, teacher_id, version, size, status, ddl, oss_key, pdf_oss_key,
+                submitted_by_name, submitted_by_role, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            paper_values = (
                 owner_id,
                 teacher_id,
                 version,
@@ -231,8 +279,8 @@ async def upload_paper(
                 submitter_role,
                 now,
                 now,
-            ),
-        )
+            )
+        cursor.execute(paper_sql, paper_values)
         paper_id = cursor.lastrowid
         # 插入历史版本表
         history_sql = """
