@@ -159,7 +159,7 @@ def convert_docx_to_pdf(docx_content: bytes, filename: str) -> tuple:
 async def upload_paper(
     file: UploadFile = File(...),
     owner_id: int = Query(..., description="论文归属者ID，必须传入且为有效整数"),
-    teacher_id: int = Query(..., description="关联的老师ID，必须传入且为有效正整数"),
+    teacher_id: str = Query(..., description="关联的老师ID，必须传入"),
     db: pymysql.connections.Connection = Depends(get_db),
     current_user: Optional[str] = Query(None, description="提交者信息(JSON字符串，包含 sub/username/roles)"),
 ):
@@ -168,8 +168,8 @@ async def upload_paper(
     # 参数校验
     if not isinstance(owner_id, int) or owner_id <= 0:
         raise HTTPException(status_code=400, detail="owner_id必须是正整数")
-    if not isinstance(teacher_id, int) or teacher_id <= 0:
-        raise HTTPException(status_code=400, detail="teacher_id必须是正整数")
+    if not teacher_id or not teacher_id.strip():
+        raise HTTPException(status_code=400, detail="teacher_id不能为空")
     if owner_id != submitter_id:
         raise HTTPException(
             status_code=403,
