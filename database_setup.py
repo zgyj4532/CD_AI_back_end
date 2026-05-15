@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS `departments` (
 STUDENTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `students` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
-    `student_id` VARCHAR(20) NOT NULL COMMENT '学号',
+    `student_id` VARCHAR(64) NOT NULL COMMENT '学号',
     `name` VARCHAR(128) NOT NULL COMMENT '姓名',
     `phone` VARCHAR(32) DEFAULT NULL COMMENT '联系电话',
     `email` VARCHAR(255) DEFAULT NULL COMMENT '邮箱',
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS `teachers` (
 USER_AGENT_PERMISSIONS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `user_agent_permissions` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID',
-    `student_id` VARCHAR(20) NOT NULL COMMENT '学生学号（关联students表的student_id）',
+    `student_id` VARCHAR(64) NOT NULL COMMENT '学生学号（关联students表的student_id）',
     `admin_id` VARCHAR(64) NOT NULL COMMENT '管理员ID（关联admins表的admin_id）',
     `agent_permission` TINYINT NOT NULL DEFAULT 0 COMMENT '智能体使用权限，0-无权限，1-有权限',
     `granted_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '赋予权限的时间',
@@ -240,7 +240,7 @@ PAPERS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `papers` (
     `id` INT NOT NULL AUTO_INCREMENT COMMENT '论文ID',
     `owner_id` INT NOT NULL COMMENT '所有者ID',
-    `teacher_id` INT NOT NULL COMMENT '老师ID',
+    `teacher_id` VARCHAR(64) NOT NULL COMMENT '老师ID',
     `version` VARCHAR(20) NOT NULL COMMENT '当前版本号',
     `size` INT NOT NULL COMMENT '文件大小（字节）',
     `status` VARCHAR(32) NOT NULL COMMENT '状态（uploaded:已上传, processing:处理中, completed:完成, rejected:驳回）',
@@ -268,7 +268,7 @@ PAPER_GRADES_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `paper_grades` (
     `id` INT NOT NULL AUTO_INCREMENT COMMENT '自增ID',
     `paper_id` INT NOT NULL COMMENT '论文ID',
-    `student_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '学生ID',
+    `student_id` VARCHAR(64) DEFAULT NULL COMMENT '学生ID',
     `paper_title` VARCHAR(255) NOT NULL COMMENT '论文题目',
     `topic_significance_score` DECIMAL(5,2) DEFAULT NULL COMMENT '选题意义评分',
     `logical_ability_score` DECIMAL(5,2) DEFAULT NULL COMMENT '逻辑能力评分',
@@ -295,7 +295,7 @@ PAPER_BASIC_INFO_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `paper_basic_info` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '序号（自增主键）',
     `college` VARCHAR(128) NOT NULL COMMENT '学院',
-    `student_id` VARCHAR(20) NOT NULL COMMENT '学生学号',
+    `student_id` VARCHAR(64) NOT NULL COMMENT '学生学号',
     `student_name` VARCHAR(100) NOT NULL COMMENT '学生姓名',
     `student_major` VARCHAR(128) NOT NULL COMMENT '学生专业',
     `teacher_id` VARCHAR(64) NOT NULL COMMENT '导师工号',
@@ -364,7 +364,7 @@ PAPER_REVIEWS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `paper_reviews` (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '审阅记录ID',
     paper_id INT NOT NULL COMMENT '论文ID',
-    teacher_id INT NOT NULL COMMENT '教师ID',
+    teacher_id VARCHAR(64) NOT NULL COMMENT '教师ID',
     teacher_name VARCHAR(50) NOT NULL COMMENT '教师姓名',
     review_content TEXT NOT NULL COMMENT '审阅内容',
     review_time DATETIME NOT NULL COMMENT '审阅时间',
@@ -399,7 +399,7 @@ CREATE TABLE IF NOT EXISTS `annotations` (
 DDL_MANAGEMENT_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `ddl_management` (
     ddlid INT PRIMARY KEY AUTO_INCREMENT COMMENT 'DDL唯一ID',
-    teacher_id INT NOT NULL COMMENT '教师ID）',
+    teacher_id VARCHAR(64) NOT NULL COMMENT '教师ID）',
     teacher_name VARCHAR(50) NOT NULL COMMENT '教师姓名', 
     group_id INT NOT NULL COMMENT '群组ID',
     ddl_time DATETIME NOT NULL COMMENT '截止时间（精确到秒）',
@@ -569,7 +569,7 @@ TABLE_COLUMN_DEFINITIONS = {
     },
     "user_agent_permissions": {
         "id": "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID'",
-        "student_id": "`student_id` VARCHAR(20) NOT NULL COMMENT '学生学号（关联students表的student_id）'",
+        "student_id": "`student_id` VARCHAR(64) NOT NULL COMMENT '学生学号（关联students表的student_id）'",
         "admin_id": "`admin_id` VARCHAR(64) NOT NULL COMMENT '管理员ID（关联admins表的admin_id）'",
         "agent_permission": "`agent_permission` TINYINT NOT NULL DEFAULT 0 COMMENT '智能体使用权限，0-无权限，1-有权限'",
         "granted_at": "`granted_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '赋予权限的时间'",
@@ -595,7 +595,7 @@ TABLE_COLUMN_DEFINITIONS = {
     },
     "students": {
         "id": "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键ID'",
-        "student_id": "`student_id` VARCHAR(20) NOT NULL COMMENT '学号'",
+        "student_id": "`student_id` VARCHAR(64) NOT NULL COMMENT '学号'",
         "name": "`name` VARCHAR(128) NOT NULL COMMENT '姓名'",
         "phone": "`phone` VARCHAR(32) DEFAULT NULL COMMENT '联系电话'",
         "email": "`email` VARCHAR(255) DEFAULT NULL COMMENT '邮箱'",
@@ -687,7 +687,7 @@ TABLE_COLUMN_DEFINITIONS = {
     "papers": {
         "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '论文ID'",
         "owner_id": "`owner_id` INT NOT NULL COMMENT '所有者ID'",
-        "teacher_id": "`teacher_id` INT NOT NULL COMMENT '老师ID'",
+        "teacher_id": "`teacher_id` VARCHAR(64) NOT NULL COMMENT '老师ID'",
         "version": "`version` VARCHAR(20) NOT NULL COMMENT '当前版本号'",
         "size": "`size` INT NOT NULL COMMENT '文件大小（字节）'",
         "status": "`status` VARCHAR(32) NOT NULL COMMENT '状态（uploaded:已上传, processing:处理中, completed:完成, rejected:驳回）'",
@@ -705,7 +705,7 @@ TABLE_COLUMN_DEFINITIONS = {
     "paper_grades": {
         "id": "`id` INT NOT NULL AUTO_INCREMENT COMMENT '自增ID'",
         "paper_id": "`paper_id` INT NOT NULL COMMENT '论文ID'",
-        "student_id": "`student_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '学生ID'",
+        "student_id": "`student_id` VARCHAR(64) DEFAULT NULL COMMENT '学生ID'",
         "paper_title": "`paper_title` VARCHAR(255) NOT NULL COMMENT '论文题目'",
         "topic_significance_score": "`topic_significance_score` DECIMAL(5,2) DEFAULT NULL COMMENT '选题意义评分'",
         "logical_ability_score": "`logical_ability_score` DECIMAL(5,2) DEFAULT NULL COMMENT '逻辑能力评分'",
@@ -723,7 +723,7 @@ TABLE_COLUMN_DEFINITIONS = {
     "paper_basic_info": {
         "id": "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '序号（自增主键）'",
         "college": "`college` VARCHAR(128) NOT NULL COMMENT '学院'",
-        "student_id": "`student_id` VARCHAR(20) NOT NULL COMMENT '学生学号'",
+        "student_id": "`student_id` VARCHAR(64) NOT NULL COMMENT '学生学号'",
         "student_name": "`student_name` VARCHAR(100) NOT NULL COMMENT '学生姓名'",
         "student_major": "`student_major` VARCHAR(128) NOT NULL COMMENT '学生专业'",
         "teacher_id": "`teacher_id` VARCHAR(64) NOT NULL COMMENT '导师工号'",
@@ -758,7 +758,7 @@ TABLE_COLUMN_DEFINITIONS = {
     "paper_reviews": {
         "id": "`id` INT AUTO_INCREMENT COMMENT '审阅记录ID'",
         "paper_id": "`paper_id` INT NOT NULL COMMENT '论文ID'",
-        "teacher_id": "`teacher_id` INT NOT NULL COMMENT '教师ID'",
+        "teacher_id": "`teacher_id` VARCHAR(64) NOT NULL COMMENT '教师ID'",
         "teacher_name": "`teacher_name` VARCHAR(50) NOT NULL COMMENT '教师姓名'",
         "review_content": "`review_content` TEXT NOT NULL COMMENT '审阅内容'",
         "review_time": "`review_time` DATETIME NOT NULL COMMENT '审阅时间'",
@@ -778,7 +778,7 @@ TABLE_COLUMN_DEFINITIONS = {
     },
     "ddl_management": {
         "ddlid": "`ddlid` INT AUTO_INCREMENT COMMENT 'DDL唯一ID'",
-        "teacher_id": "`teacher_id` INT NOT NULL COMMENT '教师ID）'",
+        "teacher_id": "`teacher_id` VARCHAR(64) NOT NULL COMMENT '教师ID）'",
         "teacher_name": "`teacher_name` VARCHAR(50) NOT NULL COMMENT '教师姓名'",
         "group_id": "`group_id` INT NOT NULL COMMENT '群组ID'",
         "ddl_time": "`ddl_time` DATETIME NOT NULL COMMENT '截止时间（精确到秒）'",
@@ -1030,7 +1030,21 @@ def sync_schema(database_url: str | None = None) -> None:
                 if col_def:
                     with conn.cursor() as cur:
                         cur.execute(f"ALTER TABLE `{table}` MODIFY COLUMN {col_def};")
-        
+
+        # Align changed ID column types for string IDs
+        schema_fix_columns = {
+            "papers": ["teacher_id"],
+            "paper_grades": ["student_id"],
+            "paper_reviews": ["teacher_id"],
+            "ddl_management": ["teacher_id"],
+        }
+        for table, col_names in schema_fix_columns.items():
+            for col_name in col_names:
+                col_def = TABLE_COLUMN_DEFINITIONS.get(table, {}).get(col_name)
+                if col_def:
+                    with conn.cursor() as cur:
+                        cur.execute(f"ALTER TABLE `{table}` MODIFY COLUMN {col_def};")
+
         # Align user_sessions column definitions
         for col_def in TABLE_COLUMN_DEFINITIONS.get("user_sessions", {}).values():
             with conn.cursor() as cur:
