@@ -31,6 +31,16 @@ except ImportError:
     pd = None
 
 try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, Side
+except ImportError:
+    Workbook = None
+    Alignment = None
+    Border = None
+    Font = None
+    Side = None
+
+try:
     from docx2pdf import convert as docx2pdf_convert
 except ImportError:
     docx2pdf_convert = None
@@ -105,6 +115,24 @@ def _resolve_teacher_name(cursor, teacher_id: str) -> str:
         if row and row[0]:
             return row[0]
     return teacher_id or ""
+
+
+def _normalize_group_id(group_id) -> str:
+    if group_id is None:
+        return ""
+    return str(group_id).strip()
+
+
+def _normalize_identifier(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _ids_match(left, right) -> bool:
+    left_norm = _normalize_identifier(left)
+    right_norm = _normalize_identifier(right)
+    return bool(left_norm and right_norm and left_norm == right_norm)
 
 
 def _find_soffice_binary() -> Optional[str]:
@@ -547,7 +575,7 @@ def create_paper_status(
         current_status, current_size = current_status_row
         if current_status != "已上传":
             raise HTTPException(status_code=400, detail=f"当前论文状态为【{current_status}】，仅状态为【已上传】时可创建待审阅状态")
-        is_student = (login_user_id == student_id)
+        is_student = _ids_match(login_user_id, student_id)
         if not is_student:
             raise HTTPException(
                 status_code=403,
@@ -667,8 +695,8 @@ def update_paper_status(
         if not current_status:
             raise HTTPException(status_code=404, detail="该论文无有效状态记录，请先创建状态")
         
-        is_student = (login_user_id == student_id)
-        is_teacher = (login_user_id == teacher_id)
+        is_student = _ids_match(login_user_id, student_id)
+        is_teacher = _ids_match(login_user_id, teacher_id)
         status_rules = {
             "待审阅": {
                 "student": ["待审阅"],     
@@ -808,14 +836,14 @@ def submit_paper_review(
             raise HTTPException(status_code=404, detail=f"论文ID {paper_id} 不存在")
         
         paper_db_id, paper_teacher_id = paper_row
-        if paper_teacher_id != login_user_id:
+        if not _ids_match(paper_teacher_id, login_user_id):
             raise HTTPException(
                 status_code=403,
                 detail=f"无权限提交审阅：论文ID {paper_id} 关联的教师ID为 {paper_teacher_id}，当前登录教师ID为 {login_user_id}"
             )
         cursor.execute(
             "SELECT id FROM paper_reviews WHERE paper_id = %s AND teacher_id = %s LIMIT 1",
-            (paper_id, login_user_id)
+            (paper_id, str(login_user_id))
         )
         existing_review = cursor.fetchone()
         if existing_review:
@@ -842,7 +870,7 @@ def submit_paper_review(
             insert_sql,
             (
                 paper_id,
-                login_user_id,
+                str(login_user_id),
                 teacher_name,
                 review_content,
                 review_time_str,
@@ -902,14 +930,14 @@ def update_paper_review(
             raise HTTPException(status_code=404, detail=f"论文ID {paper_id} 不存在")
         
         paper_db_id, paper_teacher_id = paper_row
-        if paper_teacher_id != login_user_id:
+        if not _ids_match(paper_teacher_id, login_user_id):
             raise HTTPException(
                 status_code=403,
                 detail=f"无权限更新审阅：论文ID {paper_id} 关联的教师ID为 {paper_teacher_id}，当前登录教师ID为 {login_user_id}"
             )
         cursor.execute(
             "SELECT id, review_content FROM paper_reviews WHERE paper_id = %s AND teacher_id = %s LIMIT 1",
-            (paper_id, login_user_id)
+            (paper_id, str(login_user_id))
         )
         review_row = cursor.fetchone()
         if not review_row:
@@ -934,7 +962,7 @@ def update_paper_review(
                 update_time_str,
                 review_id,
                 paper_id,
-                login_user_id
+                str(login_user_id)
             )
         )
         db.commit()
@@ -998,10 +1026,10 @@ def get_paper_review(
         
         permission_denied = True
         # 教师权限：角色是教师 + 登录ID匹配论文的teacher_id
-        if is_teacher and login_user_id == paper_teacher_id:
+        if is_teacher and _ids_match(login_user_id, paper_teacher_id):
             permission_denied = False
         # 学生权限：角色是学生 + 登录ID匹配论文的owner_id
-        if is_student and login_user_id == paper_owner_id:
+        if is_student and _ids_match(login_user_id, paper_owner_id):
             permission_denied = False
         
         if permission_denied:
@@ -1082,8 +1110,8 @@ def list_versions(
             raise HTTPException(status_code=404, detail="论文不存在")
         paper_owner_id, paper_teacher_id = paper_info
         
-        is_owner = (paper_owner_id == submitter_id)
-        is_teacher = (paper_teacher_id == submitter_id)
+        is_owner = _ids_match(paper_owner_id, submitter_id)
+        is_teacher = _ids_match(paper_teacher_id, submitter_id)
         is_admin = ("admin" in current_roles) or ("管理员" in current_roles)
         if not is_owner and not is_teacher and not is_admin:
             raise HTTPException(
@@ -1147,8 +1175,8 @@ async def list_student_papers(
         paper_teacher_id = paper_teacher_id[0] if paper_teacher_id else 0
         
         # 权限判断：本人/指导老师/管理员
-        is_owner = (owner_id == login_user_id)
-        is_teacher = (paper_teacher_id == login_user_id)
+        is_owner = _ids_match(owner_id, login_user_id)
+        is_teacher = _ids_match(paper_teacher_id, login_user_id)
         is_admin = ("admin" in current_roles) or ("管理员" in current_roles)
         
         if not is_owner and not is_teacher and not is_admin:
@@ -1222,13 +1250,13 @@ def download_paper(
         if not row:
             raise HTTPException(status_code=404, detail="论文不存在")
         paper_owner_id, teacher_id, latest_version, oss_key = row
-        if paper_owner_id != student_id:
+        if not _ids_match(paper_owner_id, student_id):
             raise HTTPException(
                 status_code=400,
                 detail=f"传入的学生ID({student_id})与论文归属者ID({paper_owner_id})不一致"
             )
-        is_student = (login_user_id == paper_owner_id)  
-        is_teacher = (login_user_id == teacher_id)    
+        is_student = _ids_match(login_user_id, paper_owner_id)
+        is_teacher = _ids_match(login_user_id, teacher_id)
         is_admin = ("admin" in login_user_roles) or ("管理员" in login_user_roles)  # 管理员
         if not is_student and not is_teacher and not is_admin:
             raise HTTPException(
@@ -1318,6 +1346,7 @@ def create_ddl(
     login_user_id = current_user.get("sub", 0)
     login_user_roles = current_user.get("roles", [])
     teacher_name = current_user.get("username", "") 
+    group_id = _normalize_group_id(group_id)
     # 基础校验
     if not teacher_name:
         raise HTTPException(status_code=400, detail="教师姓名不能为空")
@@ -1427,18 +1456,19 @@ def create_ddl(
     description="根据群组ID查询对应的DDL截止时间"
 )
 def list_ddl(
-    group_id: int = Query(..., description="群组ID（查询该群组的DDL）"),
+    group_id: str = Query(..., description="群组ID（查询该群组的DDL，字符串类型）"),
     db: pymysql.connections.Connection = Depends(get_db),
     current_user: Optional[str] = Query(None, description="登录用户信息(JSON字符串，包含 sub/username/roles)"),
 ):
     current_user = _parse_current_user(current_user)
     login_user_id = current_user.get("sub", 0)
     login_user_roles = current_user.get("roles", [])
+    group_id = _normalize_group_id(group_id)
     # 基础校验
     if login_user_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录后再操作")
-    if not isinstance(group_id, int) or group_id <= 0:
-        raise HTTPException(status_code=400, detail="group_id必须是正整数")
+    if not group_id:
+        raise HTTPException(status_code=400, detail="group_id不能为空")
     # 数据库查询
     cursor = None
     try:
@@ -1650,7 +1680,7 @@ def delete_ddl(
         ddl_teacher_id, ddl_teacher_name = row
         # 权限校验
         is_admin = "admin" in login_user_roles or "管理员" in login_user_roles
-        is_owner = ddl_teacher_id == login_user_id
+        is_owner = _ids_match(ddl_teacher_id, login_user_id)
         
         if not is_owner and not is_admin:
             raise HTTPException(
@@ -1685,7 +1715,8 @@ def delete_ddl(
         # 方式2：如果metadata方式没找到，通过group_id匹配
         if deleted_messages_count == 0 and group_id:
             delete_messages_sql = "DELETE FROM user_messages WHERE source = 'ddl' AND metadata LIKE %s"
-            cursor.execute(delete_messages_sql, (f'%\"group_id\": {group_id}%',))
+            group_id_fragment = json.dumps({"group_id": str(group_id)}, ensure_ascii=False)[1:-1]
+            cursor.execute(delete_messages_sql, (f'%{group_id_fragment}%',))
             deleted_messages_count = cursor.rowcount
         
         # 方式3：如果metadata方式没找到，尝试通过消息内容匹配
@@ -1803,7 +1834,7 @@ def update_ddl(
         
         # 2. 权限校验
         is_admin = "admin" in login_user_roles or "管理员" in login_user_roles
-        is_owner = ddl_teacher_id == login_user_id
+        is_owner = _ids_match(ddl_teacher_id, login_user_id)
         
         if not is_owner and not is_admin:
             raise HTTPException(
@@ -1894,6 +1925,7 @@ def _fetch_paper_student_basic_info(
                         student_id,
                         student_name,
                         student_major,
+                        class_name,
                         teacher_name,
                         teacher_title,
                         paper_title,
@@ -1925,6 +1957,7 @@ def _fetch_paper_student_basic_info(
                     student_id,
                     student_name,
                     student_major,
+                    class_name,
                     teacher_name,
                     teacher_title,
                     paper_title,
@@ -1951,6 +1984,7 @@ def _fetch_paper_student_basic_info(
                         pbi.student_id,
                         pbi.student_name,
                         pbi.student_major,
+                        pbi.class_name,
                         pbi.teacher_name,
                         pbi.teacher_title,
                         pbi.paper_title,
@@ -1980,6 +2014,7 @@ def _fetch_paper_student_basic_info(
             "student_id": row.get("student_id"),
             "student_name": row.get("student_name"),
             "student_major": row.get("student_major"),
+            "class_name": row.get("class_name"),
             "teacher_name": row.get("teacher_name"),
             "teacher_title": row.get("teacher_title"),
             "paper_title": row.get("paper_title"),
@@ -2240,6 +2275,117 @@ def _build_review_table_docx(basic_info: dict, grades: dict) -> bytes:
     return buffer.getvalue()
 
 
+def _review_opinion_table_docx_xml(basic_info: dict, reviews: list[dict]) -> str:
+    col_widths = [420, 1750, 3200, 2850, 700]
+    table_width = sum(col_widths)
+
+    rows = [
+        _docx_row(
+            [
+                _docx_cell(_docx_text_paragraph("序\n号", align="center", bold=True, size=24, spacing_after=0), width=col_widths[0]),
+                _docx_cell(_docx_text_paragraph("问题所在位置", align="center", bold=True, size=24, spacing_after=0), width=col_widths[1]),
+                _docx_cell(_docx_text_paragraph("评审意见", align="center", bold=True, size=24, spacing_after=0), width=col_widths[2]),
+                _docx_cell(_docx_text_paragraph("学生修改反馈", align="center", bold=True, size=24, spacing_after=0), width=col_widths[3]),
+                _docx_cell(_docx_text_paragraph("备注", align="center", bold=True, size=24, spacing_after=0), width=col_widths[4]),
+            ],
+            height=720,
+        )
+    ]
+
+    for index, review in enumerate(reviews, start=1):
+        opinion_text = (review.get("review_content") or "").strip()
+        rows.append(
+            _docx_row(
+                [
+                    _docx_cell(_docx_text_paragraph(str(index), align="center", size=24, spacing_after=0), width=col_widths[0]),
+                    _docx_cell(_docx_text_paragraph("", size=24, spacing_after=0), width=col_widths[1], v_align="top"),
+                    _docx_cell(_docx_text_paragraph(opinion_text, size=24, spacing_after=0), width=col_widths[2], v_align="top"),
+                    _docx_cell(_docx_text_paragraph("", size=24, spacing_after=0), width=col_widths[3], v_align="top"),
+                    _docx_cell(_docx_text_paragraph("", size=24, spacing_after=0), width=col_widths[4], v_align="top"),
+                ],
+                height=760,
+            )
+        )
+
+    table = (
+        "<w:tbl>"
+        "<w:tblPr>"
+        f'<w:tblW w:w="{table_width}" w:type="dxa"/>'
+        '<w:tblLayout w:type="fixed"/>'
+        '<w:tblBorders><w:top w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+        '<w:left w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+        '<w:bottom w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+        '<w:right w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+        '<w:insideH w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
+        '<w:insideV w:val="single" w:sz="8" w:space="0" w:color="000000"/></w:tblBorders>'
+        "</w:tblPr>"
+        "<w:tblGrid>"
+        + "".join(f'<w:gridCol w:w="{width}"/>' for width in col_widths)
+        + "</w:tblGrid>"
+        + "".join(rows)
+        + "</w:tbl>"
+    )
+
+    teacher_name = basic_info.get("teacher_name") or ""
+    student_name = basic_info.get("student_name") or ""
+    student_id = basic_info.get("student_id") or ""
+    class_name = basic_info.get("class_name") or ""
+    paper_title = basic_info.get("paper_title") or ""
+
+    document_body = (
+        _docx_text_paragraph("中国计量大学信息工程学院毕业论文评审意见", align="center", bold=True, size=32, spacing_after=360)
+        + _docx_paragraph(
+            [
+                _docx_run("指导教师：", size=24),
+                _docx_run(f"{teacher_name:^12}", underline=True, size=24),
+                _docx_run("  姓名：", size=24),
+                _docx_run(f"{student_name:^12}", underline=True, size=24),
+                _docx_run("  学号：", size=24),
+                _docx_run(f"{student_id:^14}", underline=True, size=24),
+                _docx_run("  班级：", size=24),
+                _docx_run(f"{class_name:^12}", underline=True, size=24),
+            ],
+            spacing_after=240,
+        )
+        + _docx_paragraph(
+            [
+                _docx_run("题目：", size=24),
+                _docx_run(f"{paper_title:<56}", underline=True, size=24),
+            ],
+            spacing_after=220,
+        )
+        + _docx_text_paragraph("评审情况记录：", bold=True, size=28, spacing_after=180)
+        + table
+        + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="900" w:right="1440" w:bottom="900" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{document_body}</w:body>"
+        "</w:document>"
+    )
+
+
+def _build_review_opinion_table_docx(basic_info: dict, reviews: list[dict]) -> bytes:
+    document_xml = _review_opinion_table_docx_xml(basic_info, reviews)
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+    rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as docx_zip:
+        docx_zip.writestr("[Content_Types].xml", content_types)
+        docx_zip.writestr("_rels/.rels", rels_xml)
+        docx_zip.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
+
+
 def _fetch_review_table_data(
     db: pymysql.connections.Connection,
     paper_id: Optional[int] = None,
@@ -2316,7 +2462,7 @@ def _fetch_review_table_data(
                     pbi.teacher_name,
                     pbi.teacher_title,
                     pbi.paper_title,
-                    s.class_name
+                    COALESCE(pbi.class_name, s.class_name) AS class_name
                 FROM paper_basic_info pbi
                 LEFT JOIN students s ON s.student_id = pbi.student_id
                 WHERE pbi.student_id = %s
@@ -2371,6 +2517,249 @@ def _fetch_review_table_data(
         if not grade_row:
             grade_row = {}
         return basic_row, grade_row
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库操作失败: {str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+def _fetch_review_opinion_table_data(
+    db: pymysql.connections.Connection,
+    paper_id: Optional[int] = None,
+    student_id: Optional[str] = None,
+) -> tuple[dict, list[dict]]:
+    if paper_id is None and student_id is None:
+        raise HTTPException(status_code=400, detail="paper_id和student_id必须传入一个")
+    if paper_id is not None and student_id is not None:
+        raise HTTPException(status_code=400, detail="paper_id和student_id只能传入一个")
+    if paper_id is not None and paper_id <= 0:
+        raise HTTPException(status_code=400, detail="paper_id必须是正整数")
+
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        resolved_paper_id = paper_id
+        student_internal_id = None
+        student_number = None
+        basic_row = None
+
+        if paper_id is not None:
+            cursor.execute(
+                """
+                SELECT p.id AS paper_id, p.owner_id, s.student_id
+                FROM papers p
+                LEFT JOIN students s ON s.id = p.owner_id
+                WHERE p.id = %s
+                LIMIT 1
+                """,
+                (paper_id,),
+            )
+            paper_row = cursor.fetchone()
+            if paper_row:
+                student_internal_id = paper_row.get("owner_id")
+                student_number = str(paper_row["student_id"]) if paper_row.get("student_id") else None
+            else:
+                # 兼容将 paper_basic_info.id 当作 paper_id 传入的情况
+                cursor.execute(
+                    """
+                    SELECT
+                        pbi.id,
+                        pbi.college,
+                        pbi.student_id,
+                        pbi.student_name,
+                        COALESCE(pbi.class_name, s.class_name) AS class_name,
+                        pbi.teacher_name,
+                        pbi.teacher_title,
+                        pbi.paper_title,
+                        s.id AS student_internal_id
+                    FROM paper_basic_info pbi
+                    LEFT JOIN students s ON s.student_id = pbi.student_id
+                    WHERE pbi.id = %s
+                    LIMIT 1
+                    """,
+                    (paper_id,),
+                )
+                basic_row = cursor.fetchone()
+                if not basic_row:
+                    raise HTTPException(status_code=404, detail=f"论文ID {paper_id} 不存在")
+                student_number = str(basic_row["student_id"]) if basic_row.get("student_id") else None
+                student_internal_id = basic_row.get("student_internal_id")
+        else:
+            student_id_value = str(student_id).strip() if student_id is not None else ""
+            if not student_id_value:
+                raise HTTPException(status_code=400, detail="student_id不能为空")
+
+            cursor.execute(
+                """
+                SELECT
+                    pbi.id,
+                    pbi.college,
+                    pbi.student_id,
+                    pbi.student_name,
+                    COALESCE(pbi.class_name, s.class_name) AS class_name,
+                    pbi.teacher_name,
+                    pbi.teacher_title,
+                    pbi.paper_title,
+                    s.id AS student_internal_id
+                FROM paper_basic_info pbi
+                LEFT JOIN students s ON s.student_id = pbi.student_id
+                WHERE pbi.student_id = %s
+                ORDER BY pbi.updated_at DESC, pbi.id DESC
+                LIMIT 1
+                """,
+                (student_id_value,),
+            )
+            basic_row = cursor.fetchone()
+            if basic_row:
+                student_number = str(basic_row["student_id"]) if basic_row.get("student_id") else student_id_value
+                student_internal_id = basic_row.get("student_internal_id")
+
+            paper_row = None
+            if student_id_value.isdigit():
+                if basic_row is None:
+                    cursor.execute(
+                        """
+                        SELECT
+                            pbi.id,
+                            pbi.college,
+                            pbi.student_id,
+                            pbi.student_name,
+                            COALESCE(pbi.class_name, s.class_name) AS class_name,
+                            pbi.teacher_name,
+                            pbi.teacher_title,
+                            pbi.paper_title,
+                            s.id AS student_internal_id
+                        FROM paper_basic_info pbi
+                        JOIN students s ON s.student_id = pbi.student_id
+                        WHERE s.id = %s
+                        ORDER BY pbi.updated_at DESC, pbi.id DESC
+                        LIMIT 1
+                        """,
+                        (int(student_id_value),),
+                    )
+                    basic_row = cursor.fetchone()
+                    if basic_row:
+                        student_number = str(basic_row["student_id"]) if basic_row.get("student_id") else student_id_value
+                        student_internal_id = basic_row.get("student_internal_id")
+
+                cursor.execute(
+                    """
+                    SELECT
+                        p.id AS paper_id,
+                        p.owner_id AS student_internal_id,
+                        s.student_id
+                    FROM papers p
+                    LEFT JOIN students s ON s.id = p.owner_id
+                    WHERE s.student_id = %s
+                    ORDER BY p.updated_at DESC, p.id DESC
+                    LIMIT 1
+                    """,
+                    (student_id_value,),
+                )
+                paper_row = cursor.fetchone()
+                if not paper_row:
+                    fallback_student_internal_id = (
+                        student_internal_id if student_internal_id is not None else int(student_id_value)
+                    )
+                    cursor.execute(
+                        """
+                        SELECT
+                            p.id AS paper_id,
+                            p.owner_id AS student_internal_id,
+                            s.student_id
+                        FROM papers p
+                        LEFT JOIN students s ON s.id = p.owner_id
+                        WHERE p.owner_id = %s OR s.id = %s
+                        ORDER BY p.updated_at DESC, p.id DESC
+                        LIMIT 1
+                        """,
+                        (fallback_student_internal_id, fallback_student_internal_id),
+                    )
+                    paper_row = cursor.fetchone()
+            else:
+                cursor.execute(
+                    """
+                    SELECT
+                        p.id AS paper_id,
+                        p.owner_id AS student_internal_id,
+                        s.student_id
+                    FROM papers p
+                    LEFT JOIN students s ON s.id = p.owner_id
+                    WHERE s.student_id = %s
+                    ORDER BY p.updated_at DESC, p.id DESC
+                    LIMIT 1
+                    """,
+                    (student_id_value,),
+                )
+                paper_row = cursor.fetchone()
+            if paper_row:
+                resolved_paper_id = paper_row.get("paper_id")
+                student_internal_id = paper_row.get("student_internal_id")
+                student_number = str(paper_row["student_id"]) if paper_row.get("student_id") else student_number
+            elif basic_row is None:
+                raise HTTPException(status_code=404, detail=f"学生ID/学号 {student_id} 未找到对应论文")
+
+        if basic_row is None:
+            for candidate_student_id in [student_number, str(student_internal_id) if student_internal_id is not None else None]:
+                if not candidate_student_id:
+                    continue
+                cursor.execute(
+                    """
+                    SELECT
+                        pbi.college,
+                        pbi.student_id,
+                        pbi.student_name,
+                        pbi.teacher_name,
+                        pbi.teacher_title,
+                        pbi.paper_title,
+                        COALESCE(pbi.class_name, s.class_name) AS class_name
+                    FROM paper_basic_info pbi
+                    LEFT JOIN students s ON s.student_id = pbi.student_id
+                    WHERE pbi.student_id = %s
+                    ORDER BY pbi.updated_at DESC, pbi.id DESC
+                    LIMIT 1
+                    """,
+                    (candidate_student_id,),
+                )
+                basic_row = cursor.fetchone()
+                if basic_row:
+                    break
+
+        if not basic_row:
+            raise HTTPException(status_code=404, detail="未找到对应论文基础信息")
+
+        review_rows = []
+        review_paper_ids = []
+        if resolved_paper_id is not None:
+            review_paper_ids.append(resolved_paper_id)
+        if paper_id is not None and paper_id not in review_paper_ids:
+            review_paper_ids.append(paper_id)
+
+        for review_paper_id in review_paper_ids:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    paper_id,
+                    teacher_id,
+                    teacher_name,
+                    review_content,
+                    review_time,
+                    updated_time,
+                    created_at,
+                    updated_at
+                FROM paper_reviews
+                WHERE paper_id = %s
+                ORDER BY review_time ASC, created_at ASC, id ASC
+                """,
+                (review_paper_id,),
+            )
+            review_rows = cursor.fetchall() or []
+            if review_rows:
+                break
+
+        return basic_row, review_rows
     except pymysql.MySQLError as e:
         raise HTTPException(status_code=500, detail=f"数据库操作失败: {str(e)}")
     finally:
@@ -2706,6 +3095,192 @@ def download_review_table_docx(
 
 
 @router.get(
+    "/review-opinion-table-download",
+    summary="下载论文评审意见表",
+    description="输入论文ID或学生ID（二选一），自动填充论文基础信息和评审意见，并下载 .docx 格式评审意见表",
+    responses={
+        200: {
+            "content": {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {}
+            },
+            "description": "论文评审意见表 Word 文件",
+        }
+    },
+)
+def download_review_opinion_table_docx(
+    paper_id: Optional[int] = Query(None, description="论文ID，与student_id二选一"),
+    student_id: Optional[str] = Query(None, description="学生ID或学号，与paper_id二选一"),
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    basic_info, reviews = _fetch_review_opinion_table_data(db, paper_id=paper_id, student_id=student_id)
+    docx_bytes = _build_review_opinion_table_docx(basic_info, reviews)
+    student_number = str(basic_info.get("student_id") or student_id or paper_id or "unknown")
+    filename = f"论文评审意见表_{student_number}.docx"
+    encoded_filename = urllib.parse.quote(filename)
+
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f"attachment; filename=review_opinion_table_{student_number}.docx; filename*=UTF-8''{encoded_filename}"
+        },
+    )
+
+
+@router.get(
+    "/score-summary-export",
+    summary="导出成绩汇总表",
+    description="按班级筛选论文基础信息，按学号从小到大排序，导出 .xlsx 成绩汇总表",
+    responses={
+        200: {
+            "content": {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {}
+            },
+            "description": "成绩汇总表 Excel 文件",
+        }
+    },
+)
+def export_score_summary_excel(
+    class_name: str = Query(..., description="班级名称（按 paper_basic_info.class_name 精确筛选）"),
+    db: pymysql.connections.Connection = Depends(get_db),
+):
+    if Workbook is None:
+        raise HTTPException(status_code=500, detail="需要安装 openpyxl 库")
+
+    class_name = str(class_name).strip()
+    if not class_name:
+        raise HTTPException(status_code=400, detail="class_name不能为空")
+
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(
+            """
+            SELECT
+                student_id,
+                student_name,
+                class_name,
+                teacher_name,
+                paper_title
+            FROM paper_basic_info
+            WHERE class_name = %s
+            ORDER BY
+                CASE
+                    WHEN student_id REGEXP '^[0-9]+$' THEN 0
+                    ELSE 1
+                END ASC,
+                CASE
+                    WHEN student_id REGEXP '^[0-9]+$' THEN CAST(student_id AS UNSIGNED)
+                    ELSE NULL
+                END ASC,
+                student_id ASC,
+                id ASC
+            """,
+            (class_name,),
+        )
+        rows = cursor.fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"班级 {class_name} 未找到论文基础信息")
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "成绩汇总表"
+
+        title = f"{class_name}开题成绩汇总表"
+        headers = [
+            "序号",
+            "学号",
+            "姓名",
+            "班级",
+            "导师姓名",
+            "学生论文（设计）题目",
+            "文献综述和论文翻译成绩（50%）",
+            "开题报告成绩（25%）",
+            "开题答辩成绩（25%）",
+            "总评",
+        ]
+
+        thin_side = Side(style="thin", color="000000")
+        thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        title_font = Font(name="宋体", size=18, bold=True)
+        header_font = Font(name="宋体", size=12, bold=True)
+        body_font = Font(name="宋体", size=11)
+        center_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        left_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+        worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+        title_cell = worksheet.cell(row=1, column=1, value=title)
+        title_cell.font = title_font
+        title_cell.alignment = center_alignment
+        worksheet.row_dimensions[1].height = 34
+
+        for col_index, header in enumerate(headers, start=1):
+            cell = worksheet.cell(row=2, column=col_index, value=header)
+            cell.font = header_font
+            cell.alignment = center_alignment
+            cell.border = thin_border
+        worksheet.row_dimensions[2].height = 42
+
+        for row_index, row in enumerate(rows, start=3):
+            values = [
+                row_index - 2,
+                row.get("student_id") or "",
+                row.get("student_name") or "",
+                row.get("class_name") or "",
+                row.get("teacher_name") or "",
+                row.get("paper_title") or "",
+                "",
+                "",
+                "",
+                "",
+            ]
+            for col_index, value in enumerate(values, start=1):
+                cell = worksheet.cell(row=row_index, column=col_index, value=value)
+                cell.font = body_font
+                cell.border = thin_border
+                cell.alignment = left_alignment if col_index == 6 else center_alignment
+            worksheet.row_dimensions[row_index].height = 24
+
+        column_widths = {
+            "A": 8,
+            "B": 16,
+            "C": 12,
+            "D": 14,
+            "E": 14,
+            "F": 48,
+            "G": 18,
+            "H": 14,
+            "I": 14,
+            "J": 10,
+        }
+        for column_name, width in column_widths.items():
+            worksheet.column_dimensions[column_name].width = width
+
+        worksheet.freeze_panes = "A3"
+
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+
+        filename = f"{class_name}开题成绩汇总表.xlsx"
+        encoded_filename = urllib.parse.quote(filename)
+
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename=score_summary.xlsx; filename*=UTF-8''{encoded_filename}"
+            },
+        )
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"导出成绩汇总表失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.get(
     "/{paper_id}",
     response_model=Dict,
     summary="查看论文所有信息",
@@ -2751,7 +3326,7 @@ async def get_paper_detail(
         # 权限校验：仅论文归属学生或关联老师可访问
         paper_owner_id = paper_detail["owner_id"]
         paper_teacher_id = paper_detail["teacher_id"]
-        if submitter_id not in [paper_owner_id, paper_teacher_id]:
+        if not _ids_match(submitter_id, paper_owner_id) and not _ids_match(submitter_id, paper_teacher_id):
             raise HTTPException(
                 status_code=403,
                 detail=f"无权限查看：仅论文归属者（ID={paper_owner_id}）或关联老师（ID={paper_teacher_id}）可查看该论文信息"
@@ -2779,6 +3354,7 @@ SUPPORTED_IMPORT_EXTS = (".csv", ".tsv", ".xlsx")
     - 姓名 → student_name
     - 学生学院/课题主管学院 → college
     - 专业名称 → student_major
+    - 班级 → class_name
     - 课题名称 → paper_title
     - 课题类型 → paper_type
     - 指导教师工号 → teacher_id
@@ -2874,6 +3450,7 @@ async def import_paper_basic_info(file: UploadFile = File(...), db: pymysql.conn
             # 可选字段
             college = safe_get_str("学生学院") or safe_get_str("课题主管学院")
             student_major = safe_get_str("专业名称")
+            class_name = safe_get_str("班级")
             paper_type = safe_get_str("课题类型")
             teacher_id = safe_get_str("指导教师工号")
             teacher_name = safe_get_str("指导教师姓名")
@@ -2883,15 +3460,16 @@ async def import_paper_basic_info(file: UploadFile = File(...), db: pymysql.conn
             cursor.execute(
                 """
                 INSERT INTO paper_basic_info (
-                    college, student_id, student_name, student_major,
+                    college, student_id, student_name, student_major, class_name,
                     teacher_id, teacher_name, teacher_title,
                     paper_title, paper_keywords, paper_type,
                     research_direction, paper_language
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     college = VALUES(college),
                     student_name = VALUES(student_name),
                     student_major = VALUES(student_major),
+                    class_name = VALUES(class_name),
                     teacher_id = VALUES(teacher_id),
                     teacher_name = VALUES(teacher_name),
                     teacher_title = VALUES(teacher_title),
@@ -2902,7 +3480,7 @@ async def import_paper_basic_info(file: UploadFile = File(...), db: pymysql.conn
                     updated_at = NOW()
                 """,
                 (
-                    college, student_id, student_name, student_major,
+                    college, student_id, student_name, student_major, class_name,
                     teacher_id, teacher_name, teacher_title,
                     paper_title, "", paper_type,
                     "", "中文"
