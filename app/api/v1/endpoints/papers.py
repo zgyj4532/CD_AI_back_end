@@ -2043,7 +2043,10 @@ def _score_to_text(value) -> str:
     if value is None:
         return ""
     if isinstance(value, Decimal):
-        return format(value.normalize(), "f").rstrip("0").rstrip(".")
+        decimal_text = format(value.normalize(), "f")
+        if "." in decimal_text:
+            decimal_text = decimal_text.rstrip("0").rstrip(".")
+        return decimal_text
     try:
         numeric_value = float(value)
         return str(int(numeric_value)) if numeric_value.is_integer() else f"{numeric_value:.2f}".rstrip("0").rstrip(".")
