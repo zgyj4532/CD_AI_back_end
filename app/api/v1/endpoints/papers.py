@@ -2296,7 +2296,7 @@ def _review_opinion_table_docx_xml(basic_info: dict, reviews: list[dict]) -> str
     ]
 
     for index, review in enumerate(reviews, start=1):
-        opinion_text = (review.get("review_content") or "").strip()
+        opinion_text = (review.get("content") or review.get("review_content") or "").strip()
         rows.append(
             _docx_row(
                 [
@@ -2745,16 +2745,15 @@ def _fetch_review_opinion_table_data(
                 SELECT
                     id,
                     paper_id,
-                    teacher_id,
-                    teacher_name,
-                    review_content,
-                    review_time,
-                    updated_time,
+                    author_id,
+                    paragraph_id,
+                    coordinates,
+                    content,
                     created_at,
                     updated_at
-                FROM paper_reviews
+                FROM annotations
                 WHERE paper_id = %s
-                ORDER BY review_time ASC, created_at ASC, id ASC
+                ORDER BY created_at ASC, id ASC
                 """,
                 (review_paper_id,),
             )
